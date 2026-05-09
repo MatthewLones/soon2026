@@ -2,6 +2,7 @@
 
 import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Grid, Html, PointerLockControls, useGLTF } from '@react-three/drei';
+import * as React from 'react';
 import {
   Suspense,
   useCallback,
@@ -314,7 +315,6 @@ export default function ScanCanvas({
       <ModeHud
         mode={mode}
         onChange={changeMode}
-        room={room}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         splatAvailable={Boolean(splatUrl)}
@@ -532,32 +532,20 @@ function failureMsg(res: { ok: false; reason: string; blocking?: PlaceFailure['b
 function ModeHud({
   mode,
   onChange,
-  room,
   viewMode,
   onViewModeChange,
   splatAvailable,
 }: {
   mode: Mode;
   onChange: (m: Mode) => void;
-  room: RoomPlanRaw;
   viewMode: ViewMode;
   onViewModeChange: (v: ViewMode) => void;
   splatAvailable: boolean;
 }) {
   return (
     <div className="pointer-events-none absolute z-10 m-4 flex flex-col gap-2 text-xs leading-relaxed">
-      <div className="pointer-events-auto rounded-md bg-white/85 p-3 text-neutral-900 shadow-sm backdrop-blur-sm">
-        <div className="font-semibold">Room scan</div>
-        <div>walls: {room.walls.length}</div>
-        <div>doors: {room.doors.length}</div>
-        <div>windows: {room.windows.length}</div>
-        <div>openings: {room.openings.length}</div>
-        <div>objects: {room.objects.length}</div>
-        <div>sections: {room.sections.map((s) => s.label).join(', ')}</div>
-      </div>
-
-      <div className="pointer-events-auto rounded-md bg-white/85 p-3 text-neutral-900 shadow-sm backdrop-blur-sm">
-        <div className="mb-2 flex gap-2">
+      <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
+        <div className="flex gap-1">
           <button
             onClick={() => onChange('orbit')}
             className={
@@ -581,18 +569,10 @@ function ModeHud({
             Walk
           </button>
         </div>
-        <div className="text-[10px] text-neutral-500">
-          {mode === 'orbit' ? (
-            <>drag · scroll · right-drag · press V to walk</>
-          ) : (
-            <>click scene to look · WASD · Esc to release · V for orbit</>
-          )}
-        </div>
       </div>
 
-      <div className="pointer-events-auto rounded-md bg-white/85 p-3 text-neutral-900 shadow-sm backdrop-blur-sm">
-        <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-500">View</div>
-        <div className="flex gap-2">
+      <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
+        <div className="flex gap-1">
           {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
             const disabled = !splatAvailable && v !== 'wireframe';
             return (
@@ -614,11 +594,6 @@ function ModeHud({
             );
           })}
         </div>
-        {!splatAvailable && (
-          <div className="mt-1 text-[10px] text-neutral-500">
-            run scripts/train-splats.sh + scripts/snap-splats.ts to unlock real visuals
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1030,12 +1005,20 @@ function PlacementMesh({
   const { w, d, h } = placement.dimensions;
 
   // Box fallback for stub items (model_path: "box:WxHxD") or while the GLB
-  // suspends. Sized from the placement dimensions, sat on the floor.
+  // suspends. Sized from the placement dimensions, sat on the floor. While
+  // dragging, drop opacity hard so the user can still see the floor + other
+  // pieces underneath the moving silhouette.
   const fallback = (
     <group position={[renderX, floorY + h / 2, renderZ]} rotation={[0, renderRotY, 0]}>
-      <mesh castShadow>
+      <mesh castShadow={!isDragging}>
         <boxGeometry args={[w, h, d]} />
-        <meshStandardMaterial color="#a16207" roughness={0.7} transparent opacity={0.85} />
+        <meshStandardMaterial
+          color="#a16207"
+          roughness={0.7}
+          transparent
+          opacity={isDragging ? 0.25 : 0.85}
+          depthWrite={!isDragging}
+        />
       </mesh>
       <Html
         center
@@ -1105,22 +1088,47 @@ function PlacementMesh({
     <>
       {hitProxy}
       {url ? (
-        <Suspense fallback={fallback}>
-          <PlacedGlb
-            url={url}
-            worldX={renderX}
-            worldZ={renderZ}
-            floorY={floorY}
-            rotationY={renderRotY}
-            label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
-            labelHeight={h}
-          />
-        </Suspense>
+        <GlbErrorBoundary fallback={fallback}>
+          <Suspense fallback={fallback}>
+            <PlacedGlb
+              url={url}
+              worldX={renderX}
+              worldZ={renderZ}
+              floorY={floorY}
+              rotationY={renderRotY}
+              label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
+              labelHeight={h}
+              dragging={isDragging}
+            />
+          </Suspense>
+        </GlbErrorBoundary>
       ) : (
         fallback
       )}
     </>
   );
+}
+
+/**
+ * Catches throws from useGLTF when a .glb URL 404s (or the file is malformed)
+ * and renders the colored-box fallback instead of crashing the whole Canvas
+ * tree. Suspense only handles loading promises, not errors — so without this
+ * boundary, dropping a catalog item with a missing model nukes the scene.
+ */
+class GlbErrorBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(err: unknown) {
+    console.warn('[PlacedGlb] failed to load, falling back to box:', err);
+  }
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
 }
 
 function PlacedGlb({
@@ -1131,6 +1139,7 @@ function PlacedGlb({
   rotationY,
   label,
   labelHeight,
+  dragging = false,
 }: {
   url: string;
   worldX: number;
@@ -1139,20 +1148,51 @@ function PlacedGlb({
   rotationY: number;
   label: string;
   labelHeight: number;
+  /** While the user drags this placement, fade the model so the floor and
+   *  other pieces underneath remain visible. We mutate the cloned scene's
+   *  materials in an effect so opacity tracks the boolean. */
+  dragging?: boolean;
 }) {
   const gltf = useGLTF(url);
   // Clone so the same GLB used in multiple places renders independently.
   const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
+  useEffect(() => {
+    type MaybeMaterial = THREE.Material & {
+      transparent?: boolean;
+      opacity?: number;
+      depthWrite?: boolean;
+    };
+    const seen = new Set<THREE.Material>();
+    scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const raw of mats) {
+        if (!raw || seen.has(raw)) continue;
+        seen.add(raw);
+        const m = raw as MaybeMaterial;
+        m.transparent = dragging;
+        m.opacity = dragging ? 0.25 : 1;
+        m.depthWrite = !dragging;
+        m.needsUpdate = true;
+      }
+    });
+  }, [scene, dragging]);
   return (
     <group position={[worldX, floorY, worldZ]} rotation={[0, rotationY, 0]}>
-      <primitive object={scene} castShadow receiveShadow />
+      <primitive object={scene} castShadow={!dragging} receiveShadow={!dragging} />
       <Html
         center
         distanceFactor={8}
         position={[0, labelHeight + 0.15, 0]}
         style={{ pointerEvents: 'none' }}
       >
-        <div className="whitespace-nowrap rounded bg-emerald-700/85 px-2 py-0.5 text-[10px] font-medium text-white">
+        <div
+          className={
+            'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white transition ' +
+            (dragging ? 'bg-emerald-700/40' : 'bg-emerald-700/85')
+          }
+        >
           {label}
         </div>
       </Html>
