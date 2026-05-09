@@ -71,27 +71,38 @@ async function main() {
     console.log(`  • ${pl.id}: ${pl.catalog_item_id} @ (${pl.position.x}, ${pl.position.z}) yaw=${pl.rotation_y.toFixed(2)}`);
   }
 
-  // Pass criteria — semantic-tree surface only, no coordinate-shaped tools.
-  const placedSemantically = seenTools.has('ASSIGN_TO_WALL') || seenTools.has('ASSIGN_NEXT_TO');
-  const usedForbiddenCoordTool =
+  // Pass criteria — design-then-solve surface only, no coordinate-shaped or
+  // pre-design-era tools.
+  const designed =
+    seenTools.has('ADD_TO_WALL') || seenTools.has('ADD_NEXT_TO');
+  const solved = seenTools.has('SOLVE_LAYOUT');
+  const usedForbiddenLegacyTool =
     seenTools.has('PLACE_ITEM') ||
     seenTools.has('MOVE_ITEM') ||
     seenTools.has('ROTATE_ITEM') ||
     seenTools.has('QUERY_SPACE') ||
-    seenTools.has('GET_ROOM');
+    seenTools.has('GET_ROOM') ||
+    seenTools.has('GET_TREE') ||
+    seenTools.has('ASSIGN_TO_WALL') ||
+    seenTools.has('ASSIGN_NEXT_TO') ||
+    seenTools.has('REASSIGN_WALL') ||
+    seenTools.has('REASSIGN_NEXT_TO') ||
+    seenTools.has('UNASSIGN');
   const pass =
     seenTools.has('SEARCH_FURNITURE') &&
-    placedSemantically &&
+    designed &&
+    solved &&
     counts.assistant_message >= 1 &&
-    !usedForbiddenCoordTool;
+    !usedForbiddenLegacyTool;
   if (pass) {
     console.log('\nPASS ✓');
   } else {
     const missing: string[] = [];
     if (!seenTools.has('SEARCH_FURNITURE')) missing.push('SEARCH_FURNITURE');
-    if (!placedSemantically) missing.push('ASSIGN_TO_WALL or ASSIGN_NEXT_TO');
+    if (!designed) missing.push('ADD_TO_WALL or ADD_NEXT_TO');
+    if (!solved) missing.push('SOLVE_LAYOUT');
     if (counts.assistant_message < 1) missing.push('assistant_message');
-    if (usedForbiddenCoordTool) missing.push('(forbidden coord tool was called)');
+    if (usedForbiddenLegacyTool) missing.push('(legacy/forbidden tool was called)');
     console.log(`\nFAIL ✗ — ${missing.join(', ')}`);
   }
   process.exit(pass ? 0 : 1);

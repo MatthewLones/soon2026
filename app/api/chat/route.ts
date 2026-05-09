@@ -18,6 +18,7 @@ export async function POST(req: Request) {
     rolePromptOverride?: string;
     model?: 'sonnet' | 'opus';
     thinkingBudget?: number;
+    maxToolIterations?: number;
   };
   const message = body.message;
   if (!message || typeof message !== 'string') {
@@ -37,6 +38,7 @@ export async function POST(req: Request) {
           rolePromptOverride: body.rolePromptOverride,
           model: body.model,
           thinkingBudget: body.thinkingBudget,
+          maxToolIterations: body.maxToolIterations,
         });
       } catch (err) {
         const text = err instanceof Error ? err.message : String(err);

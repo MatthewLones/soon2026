@@ -24,6 +24,7 @@ export type AgentContext = {
   treeSchemaDoc: string;
   defaultRolePrompt: string;
   placements: Placement[];
+  design: { assignmentCount: number; hasOutcome: boolean };
   originOffset: Vec3;
   tokenEstimates: {
     json: number;

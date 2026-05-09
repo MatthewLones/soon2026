@@ -40,17 +40,32 @@ export default function AgentPanel({
       <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50/80 px-2 py-1">
         <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
           {ctx?.placements.length ?? 0} placement{ctx?.placements.length === 1 ? '' : 's'}
+          {ctx?.design && (ctx.design.assignmentCount > 0 || ctx.design.hasOutcome) && (
+            <span className="ml-1 text-amber-700">
+              · {ctx.design.assignmentCount} in design
+            </span>
+          )}
         </div>
         <button
           onClick={async () => {
-            if (!ctx?.placements.length) return;
+            const has =
+              (ctx?.placements.length ?? 0) > 0 ||
+              (ctx?.design?.assignmentCount ?? 0) > 0 ||
+              ctx?.design?.hasOutcome;
+            if (!has) return;
             await fetch('/api/placements', { method: 'DELETE' });
             onRefresh();
           }}
-          disabled={!ctx?.placements.length}
+          disabled={
+            !ctx ||
+            ((ctx.placements.length ?? 0) === 0 &&
+              (ctx.design?.assignmentCount ?? 0) === 0 &&
+              !ctx.design?.hasOutcome)
+          }
+          title="Wipe placements, design intent, and last solve outcome"
           className="rounded bg-red-600 px-2 py-0.5 text-[10px] font-medium text-white transition hover:bg-red-700 disabled:bg-neutral-200 disabled:text-neutral-400"
         >
-          reset placements
+          reset
         </button>
       </div>
       <div className="flex border-b border-neutral-200 bg-neutral-50/80">
@@ -110,6 +125,9 @@ function ChatTab({
   const [model, setModel] = useState<ModelChoice>('sonnet');
   const [thinkingOn, setThinkingOn] = useState(false);
   const [thinkingBudget, setThinkingBudget] = useState(5000);
+  /** Cap on agent ↔ tool round-trips per turn. Bump for hard placement
+   *  problems where the agent needs many ADD/SOLVE retry cycles. */
+  const [maxToolIterations, setMaxToolIterations] = useState(24);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -130,6 +148,7 @@ function ChatTab({
           rolePromptOverride,
           model,
           thinkingBudget: thinkingOn ? thinkingBudget : 0,
+          maxToolIterations,
         }),
       });
       if (!res.ok || !res.body) {
@@ -225,6 +244,23 @@ function ChatTab({
                 className="w-16 rounded border border-neutral-300 bg-white px-1 py-0.5 font-mono text-neutral-800 disabled:opacity-40"
               />
             )}
+            <label className="flex items-center gap-1 text-neutral-600" title="Max agent ↔ tool round-trips per turn (4–64)">
+              <span>iters</span>
+              <input
+                type="number"
+                value={maxToolIterations}
+                onChange={(e) =>
+                  setMaxToolIterations(
+                    Math.min(64, Math.max(4, Number(e.target.value) || 24))
+                  )
+                }
+                step={4}
+                min={4}
+                max={64}
+                disabled={streaming}
+                className="w-12 rounded border border-neutral-300 bg-white px-1 py-0.5 font-mono text-neutral-800 disabled:opacity-40"
+              />
+            </label>
             {rolePromptOverride && (
               <span className="text-amber-700">role-prompt overridden</span>
             )}

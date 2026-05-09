@@ -1,12 +1,26 @@
 /**
- * LLM tool surface (semantic tree edition). The LLM only ever sees node ids
- * and assignment-style writes — it never reasons about coordinates. The
- * engine (lib/room/assign.ts) translates assignments into validated coords;
- * the same engine is also called directly by the drag-from-catalog REST
- * handler so behavior is identical regardless of who triggered the placement.
+ * LLM tool surface — semantic-tree + design-then-solve edition.
  *
- * Custom tools live in memory and must be re-registered on every cold start
- * (PRD §9.2). `registerTools` is idempotent and lazy.
+ * Discovery (read):
+ *   - LIST_ROOMS              tree summary, room ids + brief metadata
+ *   - INSPECT_ROOM(room_id)   walls (free spans, features), objects, placements
+ *   - FIND_NODES(filters)     cross-room filtered query (legacy, kept)
+ *   - SEARCH_FURNITURE        catalog search
+ *   - GET_ITEM                full catalog detail
+ *
+ * Design (build cumulative LLM intent — no placements yet):
+ *   - ADD_TO_WALL             record a wall assignment
+ *   - ADD_NEXT_TO             record a next-to assignment
+ *   - REMOVE_FROM_DESIGN      drop one assignment from the design
+ *   - LIST_DESIGN             show design + last solve outcome
+ *
+ * Realize:
+ *   - SOLVE_LAYOUT            run optimizer, commit placements
+ *
+ * Finalization:
+ *   - FINALIZE_DESIGN         vendor-grouped order summary (unchanged)
+ *
+ * See docs/algorithm.md for the why and the cost model.
  */
 
 import { Composio } from '@composio/core';
@@ -16,18 +30,16 @@ import { z } from 'zod';
 import {
   getSession,
   findCatalogItem,
+  solveCurrentDesign,
 } from './state';
-import { searchCatalog } from './catalog';
 import {
-  assignNextTo,
-  assignToWall,
-  findNodes,
-  getCachedTree,
-  reassignNextTo,
-  reassignToWall,
-  unassign,
-} from '../room/assign';
-import { TREE_SCHEMA_DOC, describeTreeShort } from '../room/semantic_tree';
+  addNextToAssignment,
+  addWallAssignment,
+  removeAssignment,
+} from './design';
+import { searchCatalog } from './catalog';
+import { findNodes, getCachedTree } from '../room/assign';
+import { TREE_SCHEMA_DOC } from '../room/semantic_tree';
 
 type ComposioWithAnthropic = Composio<AnthropicProvider>;
 let composio: ComposioWithAnthropic | null = null;
@@ -65,35 +77,47 @@ export async function registerTools(): Promise<void> {
   if (registered) return;
   const c = getComposio();
 
-  // ---------- Perception (read) ----------
+  // ---------- Discovery ----------
 
   await c.tools.createCustomTool({
-    slug: 'GET_TREE',
-    name: 'Get the semantic room tree',
+    slug: 'LIST_ROOMS',
+    name: 'List rooms in the building',
     description:
-      'Returns the building → room(s) → walls/objects/placements tree the LLM should reason against. ' +
-      'No raw coordinates — each WallNode exposes free_spans (intervals along the wall not blocked by features or hugging furniture), ' +
-      'each ObjectNode exposes free_space_around in its local frame. Call once at the start of complex turns or after several user-driven drags.',
-    inputParams: z.object({
-      room_id: z.string().optional(),
-    }),
+      'Returns the high-level building summary: each room with its id, area in m², and counts ' +
+      'of walls / kept objects / placements. Use this to decide which room to design in. Cheap.',
+    inputParams: z.object({}),
+    execute: async () => {
+      const tree = getCachedTree();
+      return ok({
+        rooms: tree.building.rooms.map((r) => ({
+          id: r.id,
+          area_m2: r.area_m2,
+          wall_count: r.walls.length,
+          placeable_wall_count: r.walls.filter((w) => w.placeable).length,
+          object_count: r.objects.length,
+          placement_count: r.placements.length,
+          door_count: r.door_ids.length,
+          opening_count: r.opening_ids.length,
+        })),
+      });
+    },
+  });
+
+  await c.tools.createCustomTool({
+    slug: 'INSPECT_ROOM',
+    name: 'Inspect a room\'s walls, objects, and placements',
+    description:
+      'Returns full details of a single room: walls (with free_spans, features, suggests), kept objects ' +
+      '(with free_space_around in local frame), placements, and door/opening ids bordering this room. ' +
+      'Use this AFTER LIST_ROOMS to drill into the room you want to design.',
+    inputParams: z.object({ room_id: z.string() }),
     execute: async (input) => {
       const tree = getCachedTree();
-      const wantedId = (input as { room_id?: string }).room_id;
-      const filtered = wantedId
-        ? {
-            ...tree,
-            building: {
-              ...tree.building,
-              rooms: tree.building.rooms.filter((r) => r.id === wantedId),
-            },
-          }
-        : tree;
-      return ok({
-        tree: filtered,
-        summary: describeTreeShort(filtered),
-        schema_doc: TREE_SCHEMA_DOC,
-      });
+      const room = tree.building.rooms.find((r) => r.id === (input as { room_id: string }).room_id);
+      if (!room) return fail(`room_id ${(input as { room_id: string }).room_id} not in tree`);
+      const { polygon, ...rest } = room;
+      void polygon; // not for the LLM; UI uses it
+      return ok({ room: rest, schema_doc: TREE_SCHEMA_DOC });
     },
   });
 
@@ -101,9 +125,8 @@ export async function registerTools(): Promise<void> {
     slug: 'FIND_NODES',
     name: 'Filter the tree for nodes matching a constraint',
     description:
-      'Lazy search across the in-context tree — use this to find candidates without re-reading the whole tree. ' +
-      'Filters: kind (wall|object|placement), min_free_length_m, min_clearance_in_room_m, facing (compass), ' +
-      'near_category, free_side (front|back|left|right) + min_side_clearance_m. Returns shallow refs (id + headline).',
+      'Cross-room filtered search — returns shallow refs (id + headline) of walls / objects / placements ' +
+      'matching a constraint. Useful when you want "any wall ≥ 2.5 m free" without specifying a room.',
     inputParams: z.object({
       kind: z.enum(['wall', 'object', 'placement']).optional(),
       min_free_length_m: z.number().optional(),
@@ -120,34 +143,11 @@ export async function registerTools(): Promise<void> {
   });
 
   await c.tools.createCustomTool({
-    slug: 'LIST_PLACEMENTS',
-    name: 'List active placements',
-    description: 'Returns all currently-placed items (catalog id, position, rotation).',
-    inputParams: z.object({}),
-    execute: async () => {
-      const s = getSession();
-      return ok({
-        placements: s.placements.map((p) => ({
-          id: p.id,
-          catalog_item_id: p.catalog_item_id,
-          x: p.position.x,
-          z: p.position.z,
-          rotation_y: p.rotation_y,
-          dim: [p.dimensions.w, p.dimensions.d, p.dimensions.h],
-        })),
-      });
-    },
-  });
-
-  // ---------- Catalog (read) ----------
-
-  await c.tools.createCustomTool({
     slug: 'SEARCH_FURNITURE',
     name: 'Search furniture catalog',
     description:
       'Keyword + structured filter over the catalog. Pass any combination of: ' +
-      'query (substring), category, max_price, style_tags (any-of), color, material. ' +
-      'Returns up to N items (default 8).',
+      'query (substring), category, max_price, style_tags (any-of), color, material. Returns up to N items.',
     inputParams: z.object({
       query: z.string().optional(),
       category: z
@@ -192,101 +192,103 @@ export async function registerTools(): Promise<void> {
     },
   });
 
-  // ---------- Manipulation (assignment-based) ----------
+  // ---------- Design (build cumulative intent) ----------
 
   await c.tools.createCustomTool({
-    slug: 'ASSIGN_TO_WALL',
-    name: 'Place an item against a wall',
+    slug: 'ADD_TO_WALL',
+    name: 'Add a wall assignment to the design',
     description:
-      'Assign a catalog item to a wall node. The engine picks the wall axis position, computes yaw ' +
-      '(back-to-wall for sofas/beds/storage; respects anchor_side for L-sofas), and validates against ' +
-      'collisions. Optional alignment (center|left|right), offset_m along the axis, span_index for a ' +
-      'specific free_span. On failure returns reason + measurements; use FIND_NODES for alternatives.',
+      'Record an intent to place an item back-to-wall. NOTHING IS PLACED YET — call SOLVE_LAYOUT to ' +
+      'realize. The optimizer picks the exact position (centered on the wall by default), the yaw ' +
+      '(back-to-wall, with anchor_side overrides), and the wall offset. Returns the new assignment_id.',
     inputParams: z.object({
       item_id: z.string(),
       wall_id: z.string(),
-      alignment: z.enum(['center', 'left', 'right']).optional(),
-      offset_m: z.number().optional(),
-      span_index: z.number().int().nonnegative().optional(),
     }),
     execute: async (input) => {
-      const result = assignToWall(input as Parameters<typeof assignToWall>[0]);
-      return ok(result);
+      const s = getSession();
+      const i = input as { item_id: string; wall_id: string };
+      if (!findCatalogItem(i.item_id)) return fail(`item_id ${i.item_id} not in catalog`);
+      const a = addWallAssignment(s.design, i);
+      return ok({ assignment_id: a.id, kind: a.kind, item_id: a.item_id, wall_id: a.wall_id });
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'ASSIGN_NEXT_TO',
-    name: 'Place an item next to an existing object or placement',
+    slug: 'ADD_NEXT_TO',
+    name: 'Add a next-to assignment to the design',
     description:
-      'Assign a catalog item next to a target node on a given side (in the target\'s LOCAL frame: ' +
-      'front=+local-z, back=-local-z, left=-local-x, right=+local-x). The engine offsets by ' +
-      'target_extent + gap + item_extent, aligns to target.yaw by default, and validates collisions. ' +
-      'Returns success with derived coords or a side_blocked failure with measurements.',
+      'Record an intent to place an item next to an existing target (kept object or another assignment). ' +
+      'Side is the target\'s LOCAL frame: front=+local-z, etc. Seating items face the target by default; ' +
+      'others align. NOTHING IS PLACED YET — call SOLVE_LAYOUT. Multiple ADD_NEXT_TO with the same ' +
+      '(target, side) are auto-distributed evenly along the side (chairs around a table). Returns assignment_id.',
     inputParams: z.object({
       item_id: z.string(),
       target_id: z.string(),
       side: z.enum(SIDE_VALUES),
       gap_m: z.number().optional(),
-      align_to_target_yaw: z.boolean().optional(),
+      face_target: z.boolean().optional(),
     }),
     execute: async (input) => {
-      const result = assignNextTo(input as Parameters<typeof assignNextTo>[0]);
-      return ok(result);
+      const s = getSession();
+      const i = input as Parameters<typeof addNextToAssignment>[1];
+      if (!findCatalogItem(i.item_id)) return fail(`item_id ${i.item_id} not in catalog`);
+      const a = addNextToAssignment(s.design, i);
+      return ok({
+        assignment_id: a.id,
+        kind: a.kind,
+        item_id: a.item_id,
+        target_id: a.target_id,
+        side: a.side,
+        gap_m: a.gap_m,
+        face_target: a.face_target,
+      });
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'REASSIGN_WALL',
-    name: 'Move an existing placement to a different wall anchor',
+    slug: 'REMOVE_FROM_DESIGN',
+    name: 'Remove an assignment from the design',
+    description: 'Drop one assignment by its assignment_id. The next SOLVE_LAYOUT will reflect this.',
+    inputParams: z.object({ assignment_id: z.string() }),
+    execute: async (input) => {
+      const s = getSession();
+      const removed = removeAssignment(s.design, (input as { assignment_id: string }).assignment_id);
+      return removed
+        ? ok({ removed: true })
+        : fail(`assignment_id ${(input as { assignment_id: string }).assignment_id} not in design`);
+    },
+  });
+
+  await c.tools.createCustomTool({
+    slug: 'LIST_DESIGN',
+    name: 'List the current design and last solve outcome',
     description:
-      'Same body as ASSIGN_TO_WALL plus placement_id. Snapshots the world, removes the existing ' +
-      'placement, runs assignToWall, and restores the snapshot if the new anchor fails — your ' +
-      'previous state is preserved on failure.',
-    inputParams: z.object({
-      placement_id: z.string(),
-      item_id: z.string(),
-      wall_id: z.string(),
-      alignment: z.enum(['center', 'left', 'right']).optional(),
-      offset_m: z.number().optional(),
-      span_index: z.number().int().nonnegative().optional(),
-    }),
-    execute: async (input) => {
-      const result = reassignToWall(input as Parameters<typeof reassignToWall>[0]);
-      return ok(result);
+      'Returns the cumulative design (all assignments) plus the last SOLVE_LAYOUT outcome (placed/dropped). ' +
+      'Use this to verify what intent you have on the books before solving or refining.',
+    inputParams: z.object({}),
+    execute: async () => {
+      const s = getSession();
+      return ok({
+        assignments: s.design.assignments,
+        outcome: s.design.outcome,
+      });
     },
   });
 
+  // ---------- Realize ----------
+
   await c.tools.createCustomTool({
-    slug: 'REASSIGN_NEXT_TO',
-    name: 'Move an existing placement to a different target / side',
+    slug: 'SOLVE_LAYOUT',
+    name: 'Run the optimizer on the current design',
     description:
-      'Same body as ASSIGN_NEXT_TO plus placement_id. Transactional: restores the snapshot if the new ' +
-      'anchor fails.',
-    inputParams: z.object({
-      placement_id: z.string(),
-      item_id: z.string(),
-      target_id: z.string(),
-      side: z.enum(SIDE_VALUES),
-      gap_m: z.number().optional(),
-      align_to_target_yaw: z.boolean().optional(),
-    }),
-    execute: async (input) => {
-      const result = reassignNextTo(input as Parameters<typeof reassignNextTo>[0]);
-      return ok(result);
-    },
-  });
-
-  await c.tools.createCustomTool({
-    slug: 'UNASSIGN',
-    name: 'Remove a placement',
-    description: 'Remove an existing placement by id.',
-    inputParams: z.object({ placement_id: z.string() }),
-    execute: async (input) => {
-      const result = unassign((input as { placement_id: string }).placement_id);
-      if (!result.removed) {
-        return fail(`placement_id ${(input as { placement_id: string }).placement_id} not found`);
-      }
+      'Realize the design: clear prior LLM-placed items, run the optimizer (greedy + repair), commit ' +
+      'placements. User-dragged items survive as pinned obstacles. Returns { placed: [...], dropped: [{ ' +
+      'assignment_id, reason, detail, measurements }] }. Read dropped reasons and reissue ADD_/REMOVE_ ' +
+      'before re-solving.',
+    inputParams: z.object({}),
+    execute: async () => {
+      const result = await solveCurrentDesign();
       return ok(result);
     },
   });
@@ -341,15 +343,15 @@ export async function registerTools(): Promise<void> {
 }
 
 export const ALL_TOOL_SLUGS = [
-  'GET_TREE',
+  'LIST_ROOMS',
+  'INSPECT_ROOM',
   'FIND_NODES',
-  'LIST_PLACEMENTS',
   'SEARCH_FURNITURE',
   'GET_ITEM',
-  'ASSIGN_TO_WALL',
-  'ASSIGN_NEXT_TO',
-  'REASSIGN_WALL',
-  'REASSIGN_NEXT_TO',
-  'UNASSIGN',
+  'ADD_TO_WALL',
+  'ADD_NEXT_TO',
+  'REMOVE_FROM_DESIGN',
+  'LIST_DESIGN',
+  'SOLVE_LAYOUT',
   'FINALIZE_DESIGN',
 ];

@@ -26,6 +26,15 @@ export type Placement = {
   position: Vec2;
   rotation_y: number;
   dimensions: { w: number; d: number; h: number };
+  /** Where this placement came from. SOLVE_LAYOUT wipes 'design' before
+   *  re-running the optimizer; 'drag' (user-positioned) survives and is
+   *  treated as a pinned obstacle. Defaults to 'design' when omitted to
+   *  preserve existing call sites. */
+  source?: 'design' | 'drag';
+  /** Optional pointer back to the design assignment that produced this
+   *  placement (only for source='design'). Used to map results back to the
+   *  LLM's intent in SOLVE_LAYOUT output. */
+  assignment_id?: string;
 };
 
 export type Grid = {

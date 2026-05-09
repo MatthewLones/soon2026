@@ -16,6 +16,7 @@ import type { Placement } from '../room/grid';
 import type { CatalogItem } from './catalog';
 import { alignRoom, type RoomPlanRaw } from '../roomplan';
 import type { SemanticTree } from '../room/semantic_tree';
+import { type Design, emptyDesign } from './design';
 
 export type Session = {
   user_id: string;
@@ -30,6 +31,9 @@ export type Session = {
   mutation_id: number;
   /** Lazy semantic tree, keyed by mutation_id. */
   _tree?: { mutation_id: number; tree: SemanticTree };
+  /** LLM's cumulative placement intent. Built up via ADD_TO_WALL /
+   *  ADD_NEXT_TO; realised by SOLVE_LAYOUT. */
+  design: Design;
 };
 
 let cached: Session | null = null;
@@ -170,6 +174,7 @@ export function getSession(userId = 'demo_user'): Session {
     catalog: loadCatalog(),
     placements: [],
     mutation_id: 0,
+    design: emptyDesign(),
   };
   return cached;
 }
@@ -220,6 +225,33 @@ export function clearPlacements(): number {
   return n;
 }
 
+/** Wipe the LLM's accumulated design intent + last-solve outcome. The agent
+ *  uses LIST_DESIGN / INSPECT_ROOM to see prior assignments — leaving them
+ *  around after a "reset" makes the agent reason as if furniture is still
+ *  there (and re-place it on the next SOLVE_LAYOUT). */
+export function clearDesign(): { assignments: number; hadOutcome: boolean } {
+  const s = getSession();
+  const assignments = s.design.assignments.length;
+  const hadOutcome = s.design.outcome !== null;
+  s.design = emptyDesign();
+  if (assignments > 0 || hadOutcome) bump(s);
+  return { assignments, hadOutcome };
+}
+
+/** Full reset: drop all solver-placed furniture AND wipe the design intent.
+ *  Pinned (user-dragged) placements are also dropped — the user explicitly
+ *  asked for a clean slate. */
+export function resetAll(): { placements: number; assignments: number; hadOutcome: boolean } {
+  const s = getSession();
+  const placements = s.placements.length;
+  const assignments = s.design.assignments.length;
+  const hadOutcome = s.design.outcome !== null;
+  s.placements = [];
+  s.design = emptyDesign();
+  if (placements > 0 || assignments > 0 || hadOutcome) bump(s);
+  return { placements, assignments, hadOutcome };
+}
+
 export function findCatalogItem(id: string): CatalogItem | undefined {
   return getSession().catalog.find((c) => c.id === id);
 }
@@ -234,4 +266,42 @@ export function restorePlacements(snapshot: Placement[]) {
   const s = getSession();
   s.placements = snapshot;
   bump(s);
+}
+
+/** Run the optimizer on the current design. Wipes prior 'design'-source
+ *  placements but preserves user-dragged ones. Updates the design's outcome
+ *  with what was placed/dropped. */
+export async function solveCurrentDesign(): Promise<{
+  placed: Array<{ assignment_id: string; item_id: string; placement_id: string; anchor: string }>;
+  dropped: Array<{ assignment_id: string; item_id: string; reason: string; detail: string; measurements?: Record<string, number | string> }>;
+}> {
+  // Lazy import to avoid a circular dep at module-load (optimizer imports
+  // ./state for catalogLookup via the wrapper API, but the wrapper is in
+  // tools.ts; to be safe we import dynamically here).
+  const [{ solveLayout }, { buildSemanticTree }] = await Promise.all([
+    import('../room/optimizer'),
+    import('../room/semantic_tree'),
+  ]);
+  const s = getSession();
+  // Build the tree fresh against pinned items only — the LLM's cumulative
+  // intent shouldn't influence its own free-span calculations.
+  const pinned = s.placements.filter((p) => p.source === 'drag');
+  const treeForSolve = buildSemanticTree(s.room, pinned);
+  const result = solveLayout({
+    room: s.room,
+    tree: treeForSolve,
+    assignments: s.design.assignments,
+    pinned,
+    catalogLookup: (id) => s.catalog.find((c) => c.id === id),
+  });
+  // Commit: replace placements with the solver output.
+  s.placements = result.placements;
+  // Bump mutation_id so the tree (and downstream caches) rebuild.
+  bump(s);
+  s.design.outcome = {
+    last_solved_mutation_id: s.mutation_id,
+    placed: result.outcome.placed,
+    dropped: result.outcome.dropped,
+  };
+  return { placed: result.outcome.placed, dropped: result.outcome.dropped };
 }

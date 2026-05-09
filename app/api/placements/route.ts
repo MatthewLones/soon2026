@@ -7,12 +7,16 @@
  * Commits via `addPlacement` so `mutation_id` bumps and the semantic tree
  * cache invalidates before the next agent turn.
  *
- * DELETE /api/placements — wipe all placements ("Reset placements" button).
+ * DELETE /api/placements — full session reset. Wipes solver-placed AND
+ * user-dragged placements, the LLM's accumulated design intent, and the
+ * last-solve outcome. Without the design wipe, the next SOLVE_LAYOUT call
+ * would re-place every prior assignment from scratch (the bug surfaced when
+ * "reset placements" left the agent reasoning about ghost furniture).
  */
 
 import { NextRequest } from 'next/server';
 import { validatePlacement } from '@/lib/room/place';
-import { addPlacement, clearPlacements, findCatalogItem, getSession } from '@/lib/agent/state';
+import { addPlacement, findCatalogItem, getSession, resetAll } from '@/lib/agent/state';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -57,12 +61,13 @@ export async function POST(req: NextRequest) {
       position: { x: result.x, z: result.z },
       rotation_y: result.rotation_y,
       dimensions: item.dimensions,
+      source: 'drag',
     });
   }
   return Response.json(result);
 }
 
 export async function DELETE() {
-  const removed = clearPlacements();
-  return Response.json({ ok: true, removed });
+  const result = resetAll();
+  return Response.json({ ok: true, ...result });
 }

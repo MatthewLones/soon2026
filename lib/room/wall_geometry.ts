@@ -12,6 +12,7 @@
 
 import type { Room, NormalizedWall, NormalizedSurface, NormalizedObject, Vec2 } from './normalize';
 import type { Placement } from './grid';
+import { pointInPolygon } from './regions';
 
 export type WallAxis = {
   id: string;
@@ -54,8 +55,17 @@ function dot(a: Vec2, b: Vec2): number {
 }
 
 /** Build the WallAxis representation from a NormalizedWall. We reuse the
- *  outward-facing convention from snap.ts so the two stay in lock-step. */
-export function wallAxisOf(wall: NormalizedWall, roomCentroid: Vec2 = { x: 0, z: 0 }): WallAxis {
+ *  outward-facing convention from snap.ts so the two stay in lock-step.
+ *
+ *  Outward direction: prefer a point-in-polygon test against the floor outline
+ *  when available — that's robust to concave / multi-room shapes where the
+ *  geometric centroid lies on the wrong side of an interior wall. Falls back
+ *  to "outward points away from centroid" when no polygon is supplied.
+ */
+export function wallAxisOf(
+  wall: NormalizedWall,
+  opts: { floor_polygon?: Vec2[]; roomCentroid?: Vec2 } = {}
+): WallAxis {
   const cosY = Math.cos(wall.rotation_y);
   const sinY = Math.sin(wall.rotation_y);
   const half = wall.dimensions.w / 2;
@@ -63,15 +73,60 @@ export function wallAxisOf(wall: NormalizedWall, roomCentroid: Vec2 = { x: 0, z:
   const p1: Vec2 = { x: wall.position.x + cosY * half, z: wall.position.z + sinY * half };
   const axis = unit(sub(p1, p0));
 
-  // Outward normal: rotate axis -90° (right-hand). Then flip if it points into
-  // the room. The room centroid is (0,0) in our normalized frame; if outward·
-  // (wallPos - centroid) is negative, flip.
+  // Two candidate normals perpendicular to the axis. We pick whichever points
+  // OUTWARD (away from the room interior) using the best test available.
   let nx = -axis.z;
   let nz = axis.x;
-  const toWall = { x: wall.position.x - roomCentroid.x, z: wall.position.z - roomCentroid.z };
-  if (nx * toWall.x + nz * toWall.z < 0) {
-    nx = -nx;
-    nz = -nz;
+
+  if (opts.floor_polygon && opts.floor_polygon.length >= 3) {
+    // Robust: probe several points along the wall, at several inward
+    // distances, in BOTH candidate directions. Pick whichever side has more
+    // hits inside the polygon — that's the room interior.
+    //
+    // Single-point probing is fragile when the floor polygon doesn't match
+    // the wall geometry exactly: RoomPlan sometimes cuts polygon corners
+    // diagonally past the wall mesh, so a single probe at one wall midpoint
+    // 10 cm inward can land OUTSIDE the polygon for either side. Multi-point
+    // sampling votes around those scan artifacts.
+    const SAMPLE_T = [0.25, 0.5, 0.75]; // along-axis fractions
+    const SAMPLE_DISTS = [0.10, 0.30, 0.60, 1.00]; // inward distances (m)
+    let candidateHits = 0;
+    let flippedHits = 0;
+    const wallLen = wall.dimensions.w;
+    for (const t of SAMPLE_T) {
+      const sx = p0.x + axis.x * (t * wallLen);
+      const sz = p0.z + axis.z * (t * wallLen);
+      for (const d of SAMPLE_DISTS) {
+        // Test point on the candidate-inward side (− candidate normal).
+        if (pointInPolygon({ x: sx - nx * d, z: sz - nz * d }, opts.floor_polygon)) candidateHits++;
+        // Test point on the candidate-outward side (+ candidate normal).
+        if (pointInPolygon({ x: sx + nx * d, z: sz + nz * d }, opts.floor_polygon)) flippedHits++;
+      }
+    }
+    if (flippedHits > candidateHits) {
+      // The other side has more polygon-interior hits — flip.
+      nx = -nx;
+      nz = -nz;
+    } else if (flippedHits === candidateHits) {
+      // Tie (both sides equally outside or equally inside): fall through to
+      // the centroid heuristic as a last resort.
+      const centroid = opts.roomCentroid ?? { x: 0, z: 0 };
+      const toWall = { x: wall.position.x - centroid.x, z: wall.position.z - centroid.z };
+      if (nx * toWall.x + nz * toWall.z < 0) {
+        nx = -nx;
+        nz = -nz;
+      }
+    }
+    // Otherwise candidateHits > flippedHits → keep (nx, nz) as outward.
+  } else {
+    // Fallback: centroid-distance heuristic. Brittle for concave polygons but
+    // OK for convex single-room scans.
+    const centroid = opts.roomCentroid ?? { x: 0, z: 0 };
+    const toWall = { x: wall.position.x - centroid.x, z: wall.position.z - centroid.z };
+    if (nx * toWall.x + nz * toWall.z < 0) {
+      nx = -nx;
+      nz = -nz;
+    }
   }
   const outward: Vec2 = { x: nx, z: nz };
   const inward: Vec2 = { x: -nx, z: -nz };
@@ -263,7 +318,9 @@ export function nearestWallTo(
 
 /** Walk all WallAxis from a Room. Skips curved walls is the caller's choice. */
 export function buildWallAxes(room: Room, roomCentroid: Vec2 = { x: 0, z: 0 }): WallAxis[] {
-  return room.walls.map((w) => wallAxisOf(w, roomCentroid));
+  return room.walls.map((w) =>
+    wallAxisOf(w, { floor_polygon: room.floor_polygon, roomCentroid })
+  );
 }
 
 export type ObstacleFootprint = {

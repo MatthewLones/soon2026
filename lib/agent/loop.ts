@@ -1,21 +1,27 @@
 /**
  * Hand-rolled Anthropic ↔ Composio loop with per-tool-call SSE emission.
- * Now drives the semantic-tree tool surface — the LLM never sees raw
- * coordinates and only places items via ASSIGN_TO_WALL / ASSIGN_NEXT_TO.
  *
- * Loop protection: ≤ 3 consecutive failures of the same (item, node) pair
- * break the loop. The counter resets on any successful assignment so the
- * agent isn't locked out of legitimate retries (Plan-agent finding §8).
+ * Drives the design-then-solve tool surface (see lib/agent/tools.ts). The LLM
+ * builds a "design" via ADD_* tools, inspects it via LIST_DESIGN, runs the
+ * optimizer via SOLVE_LAYOUT, and refines via REMOVE_FROM_DESIGN + re-solve.
+ *
+ * System prompt carries only the tree *summary* (rooms exist, sized X). Wall /
+ * object detail is fetched via INSPECT_ROOM on demand — selective disclosure
+ * (see docs/algorithm.md).
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getComposio, registerTools } from './tools';
 import { getSession } from './state';
 import { getCachedTree } from '../room/assign';
-import { TREE_SCHEMA_DOC, compactTree, describeTreeShort } from '../room/semantic_tree';
+import { describeTreeShort } from '../room/semantic_tree';
 
-const MAX_TOOL_ITERATIONS = 12;
-const MAX_PLACE_RETRIES = 3;
+/** Default cap on agent ↔ tool round-trips per turn. The design-then-solve
+ *  flow (search → ADD → SOLVE → inspect dropped → REMOVE → ADD elsewhere →
+ *  SOLVE → ...) can chew through these fast on hard rooms. Configurable
+ *  per-turn via opts.maxToolIterations / panel control. */
+const DEFAULT_MAX_TOOL_ITERATIONS = 24;
+const MAX_ALLOWED_ITERATIONS = 64;
 
 export type ModelChoice = 'sonnet' | 'opus';
 
@@ -35,49 +41,64 @@ export type Emit = (event: SseEvent) => void;
 
 export const DEFAULT_ROLE_PROMPT = `You are an interior designer's AI assistant — opinionated, conversational, grounded in the catalog you have access to. You narrate your design choices in chat (judges see your reasoning).
 
-You see the room as a SEMANTIC TREE of nodes (Building → Room(s) → walls / objects / placements). You do NOT think in coordinates.
+You design in two phases:
 
-How to place items:
-  - ASSIGN_TO_WALL({item_id, wall_id, alignment?, offset_m?, span_index?}) — back-to-wall pieces (sofas, beds, shelves, credenzas).
-  - ASSIGN_NEXT_TO({item_id, target_id, side, gap_m?, align_to_target_yaw?}) — pieces that relate to an existing object (a chair to the left of a table, a lamp behind a sofa). \`side\` is in the target's LOCAL frame (front=+local-z; rotates with yaw).
-  - REASSIGN_WALL / REASSIGN_NEXT_TO to move an existing placement; UNASSIGN to remove.
+  Phase 1 — DISCOVER. Find the rooms, the catalog items, and the anchors (walls, kept objects).
+    LIST_ROOMS()                       — high-level summaries (id, area, wall/object counts).
+    INSPECT_ROOM(room_id)              — drill into one room to see walls (free_spans, features), objects (free_space_around), placements.
+    FIND_NODES({...})                  — cross-room filtered search (e.g. any wall with min_free_length_m: 2.4).
+    SEARCH_FURNITURE / GET_ITEM        — explore the catalog.
 
-The engine snaps the item perpendicular to the wall (back-to-wall) or to the target's local axes, validates collisions, and either succeeds or returns a SEMANTIC failure. Read the failure carefully:
-  reason: wall_too_short | no_free_span_fits | side_blocked | collision_with_existing | wall_not_placeable | out_of_bounds
-  measurements: needed_length_m / available_length_m / etc.
+  Phase 2 — DESIGN, then SOLVE. Record your intent first; nothing is placed until SOLVE_LAYOUT.
+    ADD_TO_WALL({item_id, wall_id})    — record a back-to-wall placement.
+    ADD_NEXT_TO({item_id, target_id, side, gap_m?, face_target?})
+                                       — record a placement next to a kept object or another assignment.
+                                         side is the target's LOCAL frame (front=+local-z; rotates with yaw).
+                                         Multiple ADD_NEXT_TO with the same (target, side) auto-distribute
+                                         along the side — submit 4 chairs all on "front" of a long table and
+                                         they'll space out evenly.
+    LIST_DESIGN()                      — see what intents you've recorded + the last solve outcome.
+    REMOVE_FROM_DESIGN(assignment_id)  — drop one assignment.
+    SOLVE_LAYOUT()                     — run the optimizer. Returns { placed: [...], dropped: [{ reason, measurements }] }.
 
-When a placement fails:
-  1. Use FIND_NODES to surface alternative anchors (e.g. {kind:"wall", min_free_length_m: 2.4}).
-  2. Either reassign to a different node OR pick a smaller item from the catalog and try again.
-  3. The loop limits 3 consecutive failures per (item, node) pair — moving to a different node resets that budget.
+The optimizer chooses the exact position, yaw, and gap. You don't think in coordinates. It centers wall items
+on the wall, faces seating items toward their target, aligns sibling fronts, and enforces symmetry for paired
+flanking items (same target, opposite sides). When two chairs share the same target+side, they're auto-spaced.
 
-Read the tree carefully:
-  - WallNode.free_spans tells you exactly where on each wall an item of width W will fit, and how much depth (clearance_in_room_m) is available in front.
-  - ObjectNode.free_space_around tells you how much room each side of the target has for a neighbor.
-  - WallNode.placeable=false ⇒ skip (curved walls are out of scope for v1).
+Failure modes from SOLVE_LAYOUT.dropped:
+  wall_too_short        — the wall is shorter than the item's width.
+  no_free_span_fits     — no contiguous free span on the wall is long enough or deep enough.
+  side_blocked          — the target's chosen side doesn't have enough clearance.
+  collision_with_existing — every candidate position collided with another item.
+  repair_failed         — the optimizer tried shifting the blocker by ±30 cm and it still didn't fit.
+  out_of_bounds         — the engine's chosen position fell outside the floor polygon (rare).
 
-Design principles to apply:
-  - Sofas: back to wall or anchoring an open zone, facing into the room or a focal point.
-  - Chairs: angled toward the seating cluster (15-30°). Use ASSIGN_NEXT_TO with align_to_target_yaw=false to break perpendicular alignment.
-  - Beds: headboard against a wall.
-  - Desks: face a wall or window — never wall behind you.
-  - TVs: face the primary seating, ~110 cm from screen center to viewer.
-  - Rugs: anchor seating clusters, extending ~20 cm beyond furniture edges.
+When something drops, your move is one of:
+  • REMOVE_FROM_DESIGN that assignment, then ADD_TO_WALL on a different wall (use FIND_NODES).
+  • REMOVE the dropped assignment, search for a smaller catalog item, ADD again, SOLVE.
+  • Accept the drop — explain to the user what didn't fit and why.
 
-Narrate which wall / target / span you chose and why — judges see the reasoning.`;
+Design principles:
+  • Sofas: ADD_TO_WALL — engine centers them, back to wall.
+  • Bed: ADD_TO_WALL — headboard against wall.
+  • Coffee table: ADD_NEXT_TO sofa, side="front", gap_m≈0.5.
+  • Armchairs flanking a sofa: ADD_NEXT_TO sofa, side="left" + side="right" — engine pairs them, equidistant.
+  • Side table next to sofa: ADD_NEXT_TO sofa, side="left"/"right", gap_m≈0.05.
+  • Floor lamp behind a sofa or in a corner: ADD_NEXT_TO sofa, side="back" or ADD_TO_WALL.
+  • Chairs around a dining table: 4 ADD_NEXT_TO calls, one per side — engine distributes; chair-faces-table is automatic for seating.
+
+Narrate which room you're working in, which anchors you picked, and what got placed vs dropped. The judges
+read this.`;
 
 export function buildTreeBlock(): string {
-  // Touch the session to make sure the room is loaded; the cached tree is
-  // keyed by mutation_id and rebuilt automatically on world changes.
+  // Summary only — selective disclosure (Q8). The LLM pulls room detail via
+  // INSPECT_ROOM when it actually needs walls/objects.
   getSession();
   const tree = getCachedTree();
-  return `${TREE_SCHEMA_DOC}
-
-TREE SUMMARY:
+  return `BUILDING SUMMARY:
 ${describeTreeShort(tree)}
 
-TREE JSON:
-${JSON.stringify(compactTree(tree))}`;
+Use LIST_ROOMS to refresh this summary, INSPECT_ROOM(room_id) to drill into a specific room.`;
 }
 
 function buildSystemPrompt(rolePrompt: string): Anthropic.MessageParam['content'] {
@@ -104,6 +125,9 @@ export async function runAgentTurn(
     model?: ModelChoice;
     /** Extended-thinking budget in tokens. 0 / undefined = disabled. */
     thinkingBudget?: number;
+    /** Cap on agent ↔ tool round-trips before the loop aborts. Clamped
+     *  to [4, MAX_ALLOWED_ITERATIONS]. */
+    maxToolIterations?: number;
   } = {}
 ): Promise<{ stop_reason: string | null; iterations: number; model: string }> {
   const userId = opts.userId ?? 'demo_user';
@@ -118,16 +142,16 @@ export async function runAgentTurn(
   const composio = getComposio();
   const tools = (await composio.tools.get(userId, {
     tools: [
-      'GET_TREE',
+      'LIST_ROOMS',
+      'INSPECT_ROOM',
       'FIND_NODES',
-      'LIST_PLACEMENTS',
       'SEARCH_FURNITURE',
       'GET_ITEM',
-      'ASSIGN_TO_WALL',
-      'ASSIGN_NEXT_TO',
-      'REASSIGN_WALL',
-      'REASSIGN_NEXT_TO',
-      'UNASSIGN',
+      'ADD_TO_WALL',
+      'ADD_NEXT_TO',
+      'REMOVE_FROM_DESIGN',
+      'LIST_DESIGN',
+      'SOLVE_LAYOUT',
       'FINALIZE_DESIGN',
     ],
   })) as unknown as Anthropic.Tool[];
@@ -143,6 +167,10 @@ export async function runAgentTurn(
   const modelId = MODEL_IDS[modelChoice];
   const thinkingBudget = opts.thinkingBudget ?? 0;
   const maxTokens = thinkingBudget > 0 ? Math.max(8192, thinkingBudget + 4096) : 4096;
+  const maxIterations = Math.min(
+    MAX_ALLOWED_ITERATIONS,
+    Math.max(4, opts.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS)
+  );
 
   function makeRequest(currentMessages: Anthropic.MessageParam[], includeTools = true) {
     const params: Anthropic.MessageCreateParamsNonStreaming = {
@@ -166,40 +194,21 @@ export async function runAgentTurn(
     }
   }
 
-  // Retry tracking: keyed by `${item_id}::${node_id}`. Counter resets on any
-  // successful assignment so REASSIGN chains don't lock the agent out.
-  const failureStreak = new Map<string, number>();
-
-  function pairKeyFromAssignInput(name: string, input: unknown): string | null {
-    if (!input || typeof input !== 'object') return null;
-    const obj = input as Record<string, unknown>;
-    const itemId = typeof obj.item_id === 'string' ? obj.item_id : '';
-    if (!itemId) return null;
-    if (name === 'ASSIGN_TO_WALL' || name === 'REASSIGN_WALL') {
-      const wallId = typeof obj.wall_id === 'string' ? obj.wall_id : '';
-      return wallId ? `${itemId}::${wallId}` : null;
-    }
-    if (name === 'ASSIGN_NEXT_TO' || name === 'REASSIGN_NEXT_TO') {
-      const targetId = typeof obj.target_id === 'string' ? obj.target_id : '';
-      const side = typeof obj.side === 'string' ? obj.side : '';
-      return targetId ? `${itemId}::${targetId}/${side}` : null;
-    }
-    return null;
-  }
-
   let response = await makeRequest(messages);
   emitThinkingFrom(response.content);
 
   let iterations = 0;
   while (response.stop_reason === 'tool_use') {
-    if (++iterations > MAX_TOOL_ITERATIONS) {
-      emit({ type: 'loop_aborted', reason: 'Max tool iterations exceeded', t: Date.now() - start });
+    if (++iterations > maxIterations) {
+      emit({
+        type: 'loop_aborted',
+        reason: `Max tool iterations exceeded (${maxIterations}). Bump the limit in the panel if the agent needs more tries.`,
+        t: Date.now() - start,
+      });
       break;
     }
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    let aborted = false;
-    let abortReason = '';
 
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
@@ -217,26 +226,6 @@ export async function runAgentTurn(
         arguments: block.input as Record<string, unknown>,
       });
 
-      const isAssign = ['ASSIGN_TO_WALL', 'ASSIGN_NEXT_TO', 'REASSIGN_WALL', 'REASSIGN_NEXT_TO'].includes(
-        block.name
-      );
-      if (isAssign) {
-        const data = exec.data as { ok?: boolean } | null;
-        const pairKey = pairKeyFromAssignInput(block.name, block.input);
-        if (data && data.ok === false && pairKey) {
-          const next = (failureStreak.get(pairKey) ?? 0) + 1;
-          failureStreak.set(pairKey, next);
-          if (next >= MAX_PLACE_RETRIES) {
-            abortReason = `${block.name} ${pairKey} failed ${next} times in a row`;
-            aborted = true;
-          }
-        } else if (data && data.ok === true) {
-          // Reset everything — a success suggests the agent is making progress
-          // and chained REASSIGN attempts shouldn't be punished.
-          failureStreak.clear();
-        }
-      }
-
       emit({ type: 'tool_result', id: block.id, result: exec.data, t: Date.now() - start });
       toolResults.push({
         type: 'tool_result',
@@ -247,13 +236,6 @@ export async function runAgentTurn(
 
     messages.push({ role: 'assistant', content: response.content });
     messages.push({ role: 'user', content: toolResults });
-
-    if (aborted) {
-      emit({ type: 'loop_aborted', reason: abortReason, t: Date.now() - start });
-      response = await makeRequest(messages, /* includeTools */ false);
-      emitThinkingFrom(response.content);
-      break;
-    }
 
     response = await makeRequest(messages);
     emitThinkingFrom(response.content);
