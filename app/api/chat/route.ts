@@ -16,6 +16,8 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     message?: string;
     rolePromptOverride?: string;
+    model?: 'sonnet' | 'opus';
+    thinkingBudget?: number;
   };
   const message = body.message;
   if (!message || typeof message !== 'string') {
@@ -31,7 +33,11 @@ export async function POST(req: Request) {
       };
 
       try {
-        await runAgentTurn(message, send, { rolePromptOverride: body.rolePromptOverride });
+        await runAgentTurn(message, send, {
+          rolePromptOverride: body.rolePromptOverride,
+          model: body.model,
+          thinkingBudget: body.thinkingBudget,
+        });
       } catch (err) {
         const text = err instanceof Error ? err.message : String(err);
         const frame = `event: error\ndata: ${JSON.stringify({ message: text })}\n\n`;

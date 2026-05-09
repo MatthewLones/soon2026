@@ -20,6 +20,12 @@ export type CatalogItem = {
   model_path: string;
   thumbnail_path?: string;
   orientation_correction?: { rotation_y: number; pivot_offset: [number, number, number] };
+  /** Which side of the item should anchor against a wall. The engine uses this
+   *  when computing yaw for ASSIGN_TO_WALL — `back` (default fallback) for most
+   *  upholstered seating and beds, `left_arm` / `right_arm` for asymmetric L-sofas.
+   *  `none` means the item has no preferred wall orientation (rugs, ottomans).
+   *  Absent ⇒ engine falls back to a category heuristic. */
+  anchor_side?: 'back' | 'left_arm' | 'right_arm' | 'none';
   source: 'abo' | 'vendor_upload' | 'facebook_marketplace';
 };
 

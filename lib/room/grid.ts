@@ -71,7 +71,12 @@ function setCell(g: Grid, ix: number, iz: number, value: number) {
 
 // ---------- Construction ----------
 
-export function buildGrid(room: Room, placements: Placement[]): Grid {
+export function buildGrid(
+  room: Room,
+  placements: Placement[],
+  options: { wallThickness?: number } = {}
+): Grid {
+  const wallThickness = options.wallThickness ?? WALL_THICKNESS;
   // Bbox from floor polygon, with a small margin so the grid covers OOB checks.
   const xs = room.floor_polygon.map((p) => p.x);
   const zs = room.floor_polygon.map((p) => p.z);
@@ -109,13 +114,15 @@ export function buildGrid(room: Room, placements: Placement[]): Grid {
       x: w.position.x + cosY * half,
       z: w.position.z + sinY * half,
     };
-    rasterizeSegment(grid, p0, p1, WALL_THICKNESS, CELL_WALL);
+    rasterizeSegment(grid, p0, p1, wallThickness, CELL_WALL);
   }
 
-  // Existing kept objects (PRD §5.5: only `keep` participates in collision)
+  // Existing kept objects (PRD §5.5: only `keep` participates in collision).
+  // Confidence is NOT used as a filter — when the scan is trusted, every
+  // detected object is treated as a hard blocker. Re-introduce a low-conf
+  // skip only if RoomPlan starts hallucinating again.
   for (const obj of room.detected_objects) {
     if (obj.user_decision !== 'keep') continue;
-    if (obj.confidence === 'low') continue; // skip ghosts; mirrors renderer's choice
     rasterizeOBB(
       grid,
       obj.position,
@@ -140,7 +147,7 @@ export function buildGrid(room: Room, placements: Placement[]): Grid {
 // ---------- Rasterization ----------
 
 /** Fill cells within `thickness/2` of segment p0→p1. */
-function rasterizeSegment(g: Grid, p0: Vec2, p1: Vec2, thickness: number, code: number) {
+export function rasterizeSegment(g: Grid, p0: Vec2, p1: Vec2, thickness: number, code: number) {
   const r = thickness / 2;
   const minX = Math.min(p0.x, p1.x) - r;
   const maxX = Math.max(p0.x, p1.x) + r;

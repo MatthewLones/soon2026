@@ -14,7 +14,8 @@ import { compactRoom, type CompactRoom } from '../room/serialize';
 import { describeRoom } from '../room/describe';
 import type { Placement } from '../room/grid';
 import type { CatalogItem } from './catalog';
-import type { RoomPlanRaw } from '../roomplan';
+import { alignRoom, type RoomPlanRaw } from '../roomplan';
+import type { SemanticTree } from '../room/semantic_tree';
 
 export type Session = {
   user_id: string;
@@ -23,6 +24,12 @@ export type Session = {
   room_summary: string;
   catalog: CatalogItem[];
   placements: Placement[];
+  /** Bumped on every placement add/update/remove. Used as the cache key for
+   *  the semantic tree so it rebuilds whenever the world state changes
+   *  (including drag-only moves that don't change `placements.length`). */
+  mutation_id: number;
+  /** Lazy semantic tree, keyed by mutation_id. */
+  _tree?: { mutation_id: number; tree: SemanticTree };
 };
 
 let cached: Session | null = null;
@@ -37,7 +44,9 @@ function loadRoom(): Room {
   const buf = fs.readFileSync(ROOM_FILE, 'utf-8');
   const raw = JSON.parse(buf) as RoomPlanRaw;
   delete (raw as { coreModel?: unknown }).coreModel;
-  return normalizeRoom(raw);
+  // Same alignment as app/scan/page.tsx so the agent's room state matches
+  // what's rendered. Single coordinate system for the whole app.
+  return normalizeRoom(alignRoom(raw));
 }
 
 // ---------- ABO row → CatalogItem adapter ----------
@@ -160,6 +169,7 @@ export function getSession(userId = 'demo_user'): Session {
     room_summary: describeRoom(room),
     catalog: loadCatalog(),
     placements: [],
+    mutation_id: 0,
   };
   return cached;
 }
@@ -168,10 +178,16 @@ export function resetSession() {
   cached = null;
 }
 
+function bump(s: Session) {
+  s.mutation_id += 1;
+  s._tree = undefined;
+}
+
 /** Mutating helpers — the tool handlers call these. */
 export function addPlacement(p: Placement) {
   const s = getSession();
   s.placements.push(p);
+  bump(s);
 }
 
 export function updatePlacement(id: string, patch: Partial<Omit<Placement, 'id'>>) {
@@ -179,6 +195,7 @@ export function updatePlacement(id: string, patch: Partial<Omit<Placement, 'id'>
   const i = s.placements.findIndex((p) => p.id === id);
   if (i === -1) return false;
   s.placements[i] = { ...s.placements[i], ...patch };
+  bump(s);
   return true;
 }
 
@@ -186,13 +203,35 @@ export function removePlacement(id: string): boolean {
   const s = getSession();
   const before = s.placements.length;
   s.placements = s.placements.filter((p) => p.id !== id);
-  return s.placements.length < before;
+  if (s.placements.length === before) return false;
+  bump(s);
+  return true;
 }
 
 export function findPlacement(id: string): Placement | undefined {
   return getSession().placements.find((p) => p.id === id);
 }
 
+export function clearPlacements(): number {
+  const s = getSession();
+  const n = s.placements.length;
+  s.placements = [];
+  if (n > 0) bump(s);
+  return n;
+}
+
 export function findCatalogItem(id: string): CatalogItem | undefined {
   return getSession().catalog.find((c) => c.id === id);
+}
+
+/** Snapshot the placements array for transactional reassignment. The engine
+ *  takes a snapshot, mutates, and restores on failure. */
+export function snapshotPlacements(): Placement[] {
+  return getSession().placements.map((p) => ({ ...p, position: { ...p.position }, dimensions: { ...p.dimensions } }));
+}
+
+export function restorePlacements(snapshot: Placement[]) {
+  const s = getSession();
+  s.placements = snapshot;
+  bump(s);
 }

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { RoomPlanRaw } from '@/lib/roomplan';
+import { alignRoom, type RoomPlanRaw } from '@/lib/roomplan';
 import ScanLayout from './scan-layout';
 
 export const dynamic = 'force-dynamic';
@@ -10,7 +10,10 @@ async function loadRoom(): Promise<RoomPlanRaw> {
   const buf = await fs.readFile(file, 'utf-8');
   const parsed = JSON.parse(buf) as RoomPlanRaw;
   delete parsed.coreModel;
-  return parsed;
+  // Align once at load: rotate every transform so the dominant wall is
+  // axis-parallel. From here on everything (canvas, server state, semantic
+  // tree, validator) shares one coordinate system.
+  return alignRoom(parsed);
 }
 
 async function findSplatUrl(): Promise<string | undefined> {

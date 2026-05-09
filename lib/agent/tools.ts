@@ -1,9 +1,12 @@
 /**
- * The 10 PRD §8.2 tools registered as Composio custom tools.
+ * LLM tool surface (semantic tree edition). The LLM only ever sees node ids
+ * and assignment-style writes — it never reasons about coordinates. The
+ * engine (lib/room/assign.ts) translates assignments into validated coords;
+ * the same engine is also called directly by the drag-from-catalog REST
+ * handler so behavior is identical regardless of who triggered the placement.
  *
  * Custom tools live in memory and must be re-registered on every cold start
- * (PRD §9.2). `registerTools` is idempotent and lazy — call it from any
- * entry point before invoking the agent loop.
+ * (PRD §9.2). `registerTools` is idempotent and lazy.
  */
 
 import { Composio } from '@composio/core';
@@ -12,16 +15,19 @@ import { z } from 'zod';
 
 import {
   getSession,
-  addPlacement,
-  updatePlacement,
-  removePlacement,
-  findPlacement,
   findCatalogItem,
 } from './state';
 import { searchCatalog } from './catalog';
-import { validatePlacement } from '../room/place';
-import { querySpace, type SpatialConstraint } from '../room/query_space';
-import { COMPACT_ROOM_DOC } from '../room/serialize';
+import {
+  assignNextTo,
+  assignToWall,
+  findNodes,
+  getCachedTree,
+  reassignNextTo,
+  reassignToWall,
+  unassign,
+} from '../room/assign';
+import { TREE_SCHEMA_DOC, describeTreeShort } from '../room/semantic_tree';
 
 type ComposioWithAnthropic = Composio<AnthropicProvider>;
 let composio: ComposioWithAnthropic | null = null;
@@ -40,8 +46,6 @@ export function getComposio(): ComposioWithAnthropic {
   return composio;
 }
 
-// Composio's ToolExecuteResponse expects `data: Record<string, unknown>`;
-// our handlers return concrete shapes — wrap into an object indexable type.
 type ToolEnvelope = { data: Record<string, unknown>; error: string | null; successful: boolean };
 const ok = (data: unknown): ToolEnvelope => ({
   data: data as Record<string, unknown>,
@@ -54,33 +58,8 @@ const fail = (error: string, data: unknown = {}): ToolEnvelope => ({
   successful: false,
 });
 
-const constraintSchema: z.ZodType<SpatialConstraint> = z.lazy(() =>
-  z.union([
-    z.object({
-      type: z.literal('clear_area'),
-      min_width: z.number(),
-      min_depth: z.number(),
-    }),
-    z.object({
-      type: z.literal('near_wall'),
-      wall_id: z.string(),
-      max_distance: z.number(),
-      min_width: z.number().optional(),
-      min_depth: z.number().optional(),
-    }),
-    z.object({
-      type: z.literal('facing'),
-      target_id: z.string(),
-      min_width: z.number().optional(),
-      min_depth: z.number().optional(),
-    }),
-    z.object({
-      type: z.literal('compound'),
-      op: z.enum(['AND', 'OR']),
-      constraints: z.array(constraintSchema),
-    }),
-  ])
-);
+const HEADING_VALUES = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
+const SIDE_VALUES = ['front', 'back', 'left', 'right'] as const;
 
 export async function registerTools(): Promise<void> {
   if (registered) return;
@@ -89,43 +68,61 @@ export async function registerTools(): Promise<void> {
   // ---------- Perception (read) ----------
 
   await c.tools.createCustomTool({
-    slug: 'GET_ROOM',
-    name: 'Get room state',
+    slug: 'GET_TREE',
+    name: 'Get the semantic room tree',
     description:
-      'Returns the normalized room (compact JSON) plus a natural-language summary. ' +
-      'Use this once at the start of complex turns or when your mental model of the ' +
-      'room may have drifted (e.g., after several user-driven drags).',
-    inputParams: z.object({}),
-    execute: async () => {
-      const s = getSession();
+      'Returns the building → room(s) → walls/objects/placements tree the LLM should reason against. ' +
+      'No raw coordinates — each WallNode exposes free_spans (intervals along the wall not blocked by features or hugging furniture), ' +
+      'each ObjectNode exposes free_space_around in its local frame. Call once at the start of complex turns or after several user-driven drags.',
+    inputParams: z.object({
+      room_id: z.string().optional(),
+    }),
+    execute: async (input) => {
+      const tree = getCachedTree();
+      const wantedId = (input as { room_id?: string }).room_id;
+      const filtered = wantedId
+        ? {
+            ...tree,
+            building: {
+              ...tree.building,
+              rooms: tree.building.rooms.filter((r) => r.id === wantedId),
+            },
+          }
+        : tree;
       return ok({
-        room: s.compact_room,
-        summary: s.room_summary,
-        schema_doc: COMPACT_ROOM_DOC,
+        tree: filtered,
+        summary: describeTreeShort(filtered),
+        schema_doc: TREE_SCHEMA_DOC,
       });
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'QUERY_SPACE',
-    name: 'Query space for placement candidates',
+    slug: 'FIND_NODES',
+    name: 'Filter the tree for nodes matching a constraint',
     description:
-      'Find candidate (x, z) locations matching a spatial constraint. ' +
-      'Constraint types: clear_area, near_wall, facing, compound (AND/OR). ' +
-      'Returns up to 5 matches ranked by available footprint. Always call this ' +
-      'before placing a large item — guessing coordinates wastes tool calls.',
-    inputParams: z.object({ constraint: constraintSchema }),
+      'Lazy search across the in-context tree — use this to find candidates without re-reading the whole tree. ' +
+      'Filters: kind (wall|object|placement), min_free_length_m, min_clearance_in_room_m, facing (compass), ' +
+      'near_category, free_side (front|back|left|right) + min_side_clearance_m. Returns shallow refs (id + headline).',
+    inputParams: z.object({
+      kind: z.enum(['wall', 'object', 'placement']).optional(),
+      min_free_length_m: z.number().optional(),
+      min_clearance_in_room_m: z.number().optional(),
+      facing: z.enum(HEADING_VALUES).optional(),
+      near_category: z.string().optional(),
+      free_side: z.enum(SIDE_VALUES).optional(),
+      min_side_clearance_m: z.number().optional(),
+      limit: z.number().int().positive().max(20).optional(),
+    }),
     execute: async (input) => {
-      const s = getSession();
-      const result = querySpace(s.room, s.placements, (input as { constraint: SpatialConstraint }).constraint);
-      return ok(result);
+      return ok(findNodes(input as Parameters<typeof findNodes>[0]));
     },
   });
 
   await c.tools.createCustomTool({
     slug: 'LIST_PLACEMENTS',
     name: 'List active placements',
-    description: 'Returns all currently-placed items (catalog id, position, rotation, region).',
+    description: 'Returns all currently-placed items (catalog id, position, rotation).',
     inputParams: z.object({}),
     execute: async () => {
       const s = getSession();
@@ -195,131 +192,102 @@ export async function registerTools(): Promise<void> {
     },
   });
 
-  // ---------- Manipulation (write, validated) ----------
+  // ---------- Manipulation (assignment-based) ----------
 
   await c.tools.createCustomTool({
-    slug: 'PLACE_ITEM',
-    name: 'Place item in room',
+    slug: 'ASSIGN_TO_WALL',
+    name: 'Place an item against a wall',
     description:
-      'Place a catalog item at (x, z) with rotation_y (radians). The validator ' +
-      'auto-snaps yaw to within 15° of cardinal/wall, snaps to walls within 25 cm, ' +
-      'and snaps (x, z) to a 5 cm grid. On success, returns the adjusted coords ' +
-      'and an `adjustments` array describing what was snapped. On collision/OOB, ' +
-      'returns blocking ids — read them and retry with new coords (max 3 retries).',
+      'Assign a catalog item to a wall node. The engine picks the wall axis position, computes yaw ' +
+      '(back-to-wall for sofas/beds/storage; respects anchor_side for L-sofas), and validates against ' +
+      'collisions. Optional alignment (center|left|right), offset_m along the axis, span_index for a ' +
+      'specific free_span. On failure returns reason + measurements; use FIND_NODES for alternatives.',
     inputParams: z.object({
       item_id: z.string(),
-      x: z.number(),
-      z: z.number(),
-      rotation_y: z.number(),
+      wall_id: z.string(),
+      alignment: z.enum(['center', 'left', 'right']).optional(),
+      offset_m: z.number().optional(),
+      span_index: z.number().int().nonnegative().optional(),
     }),
     execute: async (input) => {
-      const { item_id, x, z, rotation_y } = input as {
-        item_id: string;
-        x: number;
-        z: number;
-        rotation_y: number;
-      };
-      const item = findCatalogItem(item_id);
-      if (!item) return fail(`item_id ${item_id} not in catalog`);
-
-      const s = getSession();
-      const result = validatePlacement(s.room, s.placements, {
-        catalog_item_id: item_id,
-        x,
-        z,
-        rotation_y,
-        footprint: item.dimensions,
-      });
-
-      if (!result.ok) return ok(result); // structured failure is success at the tool level
-      addPlacement({
-        id: result.placement_id,
-        catalog_item_id: item_id,
-        position: { x: result.x, z: result.z },
-        rotation_y: result.rotation_y,
-        dimensions: item.dimensions,
-      });
+      const result = assignToWall(input as Parameters<typeof assignToWall>[0]);
       return ok(result);
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'MOVE_ITEM',
-    name: 'Move an existing placement',
+    slug: 'ASSIGN_NEXT_TO',
+    name: 'Place an item next to an existing object or placement',
     description:
-      'Move an existing placement to new (x, z, rotation_y). Same snap + collision ' +
-      'pipeline as place_item. Returns the same shape (success or structured failure).',
+      'Assign a catalog item next to a target node on a given side (in the target\'s LOCAL frame: ' +
+      'front=+local-z, back=-local-z, left=-local-x, right=+local-x). The engine offsets by ' +
+      'target_extent + gap + item_extent, aligns to target.yaw by default, and validates collisions. ' +
+      'Returns success with derived coords or a side_blocked failure with measurements.',
     inputParams: z.object({
-      placement_id: z.string(),
-      x: z.number(),
-      z: z.number(),
-      rotation_y: z.number(),
+      item_id: z.string(),
+      target_id: z.string(),
+      side: z.enum(SIDE_VALUES),
+      gap_m: z.number().optional(),
+      align_to_target_yaw: z.boolean().optional(),
     }),
     execute: async (input) => {
-      const { placement_id, x, z, rotation_y } = input as {
-        placement_id: string;
-        x: number;
-        z: number;
-        rotation_y: number;
-      };
-      const pl = findPlacement(placement_id);
-      if (!pl) return fail(`placement_id ${placement_id} not found`);
-
-      const s = getSession();
-      const result = validatePlacement(s.room, s.placements, {
-        catalog_item_id: pl.catalog_item_id,
-        placement_id,
-        x,
-        z,
-        rotation_y,
-        footprint: pl.dimensions,
-      });
-      if (!result.ok) return ok(result);
-      updatePlacement(placement_id, {
-        position: { x: result.x, z: result.z },
-        rotation_y: result.rotation_y,
-      });
+      const result = assignNextTo(input as Parameters<typeof assignNextTo>[0]);
       return ok(result);
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'ROTATE_ITEM',
-    name: 'Rotate an existing placement',
-    description: 'Rotate an existing placement to absolute rotation_y. Wraps move_item.',
+    slug: 'REASSIGN_WALL',
+    name: 'Move an existing placement to a different wall anchor',
+    description:
+      'Same body as ASSIGN_TO_WALL plus placement_id. Snapshots the world, removes the existing ' +
+      'placement, runs assignToWall, and restores the snapshot if the new anchor fails — your ' +
+      'previous state is preserved on failure.',
     inputParams: z.object({
       placement_id: z.string(),
-      rotation_y: z.number(),
+      item_id: z.string(),
+      wall_id: z.string(),
+      alignment: z.enum(['center', 'left', 'right']).optional(),
+      offset_m: z.number().optional(),
+      span_index: z.number().int().nonnegative().optional(),
     }),
     execute: async (input) => {
-      const { placement_id, rotation_y } = input as { placement_id: string; rotation_y: number };
-      const pl = findPlacement(placement_id);
-      if (!pl) return fail(`placement_id ${placement_id} not found`);
-
-      const s = getSession();
-      const result = validatePlacement(s.room, s.placements, {
-        catalog_item_id: pl.catalog_item_id,
-        placement_id,
-        x: pl.position.x,
-        z: pl.position.z,
-        rotation_y,
-        footprint: pl.dimensions,
-      });
-      if (!result.ok) return ok(result);
-      updatePlacement(placement_id, { rotation_y: result.rotation_y });
+      const result = reassignToWall(input as Parameters<typeof reassignToWall>[0]);
       return ok(result);
     },
   });
 
   await c.tools.createCustomTool({
-    slug: 'REMOVE_ITEM',
+    slug: 'REASSIGN_NEXT_TO',
+    name: 'Move an existing placement to a different target / side',
+    description:
+      'Same body as ASSIGN_NEXT_TO plus placement_id. Transactional: restores the snapshot if the new ' +
+      'anchor fails.',
+    inputParams: z.object({
+      placement_id: z.string(),
+      item_id: z.string(),
+      target_id: z.string(),
+      side: z.enum(SIDE_VALUES),
+      gap_m: z.number().optional(),
+      align_to_target_yaw: z.boolean().optional(),
+    }),
+    execute: async (input) => {
+      const result = reassignNextTo(input as Parameters<typeof reassignNextTo>[0]);
+      return ok(result);
+    },
+  });
+
+  await c.tools.createCustomTool({
+    slug: 'UNASSIGN',
     name: 'Remove a placement',
-    description: 'Remove a placement by id.',
+    description: 'Remove an existing placement by id.',
     inputParams: z.object({ placement_id: z.string() }),
     execute: async (input) => {
-      const removed = removePlacement((input as { placement_id: string }).placement_id);
-      if (!removed) return fail(`placement_id ${(input as { placement_id: string }).placement_id} not found`);
-      return ok({ removed: true });
+      const result = unassign((input as { placement_id: string }).placement_id);
+      if (!result.removed) {
+        return fail(`placement_id ${(input as { placement_id: string }).placement_id} not found`);
+      }
+      return ok(result);
     },
   });
 
@@ -329,8 +297,8 @@ export async function registerTools(): Promise<void> {
     slug: 'FINALIZE_DESIGN',
     name: 'Finalize design and produce order summary',
     description:
-      'Group all current placements by vendor and produce an order summary with ' +
-      'subtotals + grand total. Call only when the user has approved the design.',
+      'Group all current placements by vendor and produce an order summary with subtotals + grand total. ' +
+      'Call only when the user has approved the design.',
     inputParams: z.object({}),
     execute: async () => {
       const s = getSession();
@@ -373,14 +341,15 @@ export async function registerTools(): Promise<void> {
 }
 
 export const ALL_TOOL_SLUGS = [
-  'GET_ROOM',
-  'QUERY_SPACE',
+  'GET_TREE',
+  'FIND_NODES',
   'LIST_PLACEMENTS',
   'SEARCH_FURNITURE',
   'GET_ITEM',
-  'PLACE_ITEM',
-  'MOVE_ITEM',
-  'ROTATE_ITEM',
-  'REMOVE_ITEM',
+  'ASSIGN_TO_WALL',
+  'ASSIGN_NEXT_TO',
+  'REASSIGN_WALL',
+  'REASSIGN_NEXT_TO',
+  'UNASSIGN',
   'FINALIZE_DESIGN',
 ];
