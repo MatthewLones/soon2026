@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { RoomPlanRaw } from '@/lib/roomplan';
 import ScanCanvas from './scan-canvas';
+import AgentPanel from './panel';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,8 +36,11 @@ async function findSplatUrl(): Promise<string | undefined> {
 export default async function ScanPage() {
   const [room, splatUrl] = await Promise.all([loadRoom(), findSplatUrl()]);
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-[#dad3c5]">
-      <ScanCanvas room={room} splatUrl={splatUrl} />
+    <main className="flex h-screen w-screen overflow-hidden bg-[#dad3c5]">
+      <div className="relative min-w-0 flex-1">
+        <ScanCanvas room={room} splatUrl={splatUrl} />
+      </div>
+      <AgentPanel />
     </main>
   );
 }
