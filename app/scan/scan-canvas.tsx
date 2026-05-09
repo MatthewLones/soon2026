@@ -81,30 +81,31 @@ export default function ScanCanvas({
   const [mode, setMode] = useState<Mode>('orbit');
   const [viewMode, setViewMode] = useState<ViewMode>(splatUrl ? 'hybrid' : 'wireframe');
 
+  // When entering walk mode, splats are the most immersive view; in orbit,
+  // hybrid lets the user see both reality and the AI's structural model.
+  // Wired into mode-change instead of a useEffect to keep state updates colocated
+  // with their trigger (and avoid cascading-render lint errors).
+  const changeMode = (next: Mode) => {
+    setMode(next);
+    if (!splatUrl) return;
+    if (next === 'walk' && viewMode === 'wireframe') setViewMode('splat');
+    else if (next === 'orbit' && viewMode === 'splat') setViewMode('hybrid');
+  };
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.code === 'KeyV') setMode((m) => (m === 'orbit' ? 'walk' : 'orbit'));
+      if (e.code === 'KeyV') changeMode(mode === 'orbit' ? 'walk' : 'orbit');
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
-
-  // When entering walk mode, splats are the most immersive view; in orbit,
-  // hybrid lets the user see both reality and the AI's structural model.
-  useEffect(() => {
-    if (!splatUrl) return;
-    setViewMode((current) => {
-      if (mode === 'walk' && current === 'wireframe') return 'splat';
-      if (mode === 'orbit' && current === 'splat') return 'hybrid';
-      return current;
-    });
-  }, [mode, splatUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, viewMode, splatUrl]);
 
   return (
     <>
       <ModeHud
         mode={mode}
-        onChange={setMode}
+        onChange={changeMode}
         room={room}
         viewMode={viewMode}
         onViewModeChange={setViewMode}

@@ -25,12 +25,7 @@ export type SseEvent =
 
 export type Emit = (event: SseEvent) => void;
 
-function buildSystemPrompt(): Anthropic.MessageParam['content'] {
-  const session = getSession();
-  return [
-    {
-      type: 'text',
-      text: `You are an interior designer's AI assistant — opinionated, conversational, grounded in the catalog you have access to. You narrate your design choices in chat (judges see your reasoning).
+export const DEFAULT_ROLE_PROMPT = `You are an interior designer's AI assistant — opinionated, conversational, grounded in the catalog you have access to. You narrate your design choices in chat (judges see your reasoning).
 
 Design principles to apply when placing items:
   - Sofas: back to wall or anchoring an open zone, facing into the room or a focal point.
@@ -44,20 +39,23 @@ Tool use:
   - Always call QUERY_SPACE before placing a large item — guessing coordinates wastes calls.
   - PLACE_ITEM auto-snaps yaw, walls, and grid. Read the \`adjustments\` array and narrate what happened.
   - Read failure responses carefully. \`blocking\` lists what stopped you; pick a different spot.
-  - LIST_PLACEMENTS is your escape hatch if you're unsure of state mid-turn.`,
-      cache_control: { type: 'ephemeral' },
-    },
-    {
-      type: 'text',
-      text: `${COMPACT_ROOM_DOC}
+  - LIST_PLACEMENTS is your escape hatch if you're unsure of state mid-turn.`;
+
+export function buildRoomBlock(): string {
+  const session = getSession();
+  return `${COMPACT_ROOM_DOC}
 
 ROOM SUMMARY:
 ${session.room_summary}
 
 ROOM JSON:
-${JSON.stringify(session.compact_room)}`,
-      cache_control: { type: 'ephemeral' },
-    },
+${JSON.stringify(session.compact_room)}`;
+}
+
+function buildSystemPrompt(rolePrompt: string): Anthropic.MessageParam['content'] {
+  return [
+    { type: 'text', text: rolePrompt, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: buildRoomBlock(), cache_control: { type: 'ephemeral' } },
   ] as unknown as Anthropic.MessageParam['content'];
 }
 
@@ -71,7 +69,11 @@ function extractText(message: Anthropic.Message): string {
 export async function runAgentTurn(
   userMessage: string,
   emit: Emit,
-  opts: { userId?: string; previousMessages?: Anthropic.MessageParam[] } = {}
+  opts: {
+    userId?: string;
+    previousMessages?: Anthropic.MessageParam[];
+    rolePromptOverride?: string;
+  } = {}
 ): Promise<{ stop_reason: string | null; iterations: number }> {
   const userId = opts.userId ?? 'demo_user';
   const start = Date.now();
@@ -98,7 +100,8 @@ export async function runAgentTurn(
     ],
   })) as unknown as Anthropic.Tool[];
 
-  const systemBlocks = buildSystemPrompt();
+  const rolePrompt = opts.rolePromptOverride?.trim() || DEFAULT_ROLE_PROMPT;
+  const systemBlocks = buildSystemPrompt(rolePrompt);
   const messages: Anthropic.MessageParam[] = [
     ...(opts.previousMessages ?? []),
     { role: 'user', content: userMessage },

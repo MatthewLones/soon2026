@@ -13,7 +13,10 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as { message?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    message?: string;
+    rolePromptOverride?: string;
+  };
   const message = body.message;
   if (!message || typeof message !== 'string') {
     return new Response('Missing or non-string `message`', { status: 400 });
@@ -28,7 +31,7 @@ export async function POST(req: Request) {
       };
 
       try {
-        await runAgentTurn(message, send);
+        await runAgentTurn(message, send, { rolePromptOverride: body.rolePromptOverride });
       } catch (err) {
         const text = err instanceof Error ? err.message : String(err);
         const frame = `event: error\ndata: ${JSON.stringify({ message: text })}\n\n`;
