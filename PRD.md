@@ -316,14 +316,155 @@ Every `place_item` / `move_item` runs:
 
 ## 9. Composio Integration
 
-**All 10 agent tools registered through Composio** as the runtime. Composio handles:
-- Tool definition + schema
-- Tool dispatch from the agent loop
-- (Phase 2) third-party integrations: Gmail draft, Notion page, Calendar event
+### 9.1 SDK & versions
 
-**Day-1 spike (highest priority):** verify Composio's custom-tool registration and runtime support for our tool shape and SSE streaming. ~2 hours, must complete before architecture is committed. If Composio's runtime conflicts with our SSE streaming, we fall back to raw Anthropic SDK + Composio for tool definitions only.
+```bash
+npm install @composio/core@0.9.0 @composio/anthropic@0.9.0 @anthropic-ai/sdk zod
+```
 
-**Composio docs access:** team has MCP available — use it during the spike.
+Composio is pre-1.0 (v3 SDK line, currently `0.9.0`). Breaking changes have shipped in recent months. **Pin exact versions in `package.json`** — no `^` or `~`.
+
+Env vars (no CLI required):
+```
+COMPOSIO_API_KEY=...   # platform.composio.dev/settings
+ANTHROPIC_API_KEY=...
+```
+
+### 9.2 Custom tool registration
+
+All 10 domain tools are registered as Composio **custom tools** with Zod schemas (auto-converted to JSON Schema for Claude). Handlers run in our Node process — no webhooks, no separate execution context.
+
+```ts
+import { Composio } from '@composio/core';
+import { AnthropicProvider } from '@composio/anthropic';
+import { z } from 'zod';
+
+const composio = new Composio({ provider: new AnthropicProvider() });
+
+await composio.tools.createCustomTool({
+  slug: 'PLACE_ITEM',
+  name: 'Place item in room',
+  description: 'Places a catalog item at coordinates in the active room. Validates against collisions.',
+  inputParams: z.object({
+    item_id: z.string(),
+    x: z.number(),
+    z: z.number(),
+    rotation_y: z.number(),
+  }),
+  execute: async (input, _connectionConfig, _executeToolRequest) => {
+    const result = await placeItemInScene(input);
+    return { data: result };  // structured failure included here on rejection
+  },
+});
+```
+
+**Key gotcha:** custom tools are stored **in memory** and must be re-registered on every cold start. Register at module-load in a singleton (e.g., `lib/composio.ts`). On Vercel serverless, register inside the route handler factory or a top-of-file singleton.
+
+### 9.3 Agent loop pattern
+
+Composio does NOT provide an agent runtime. We wire it into our own loop — which is what we want for SSE control anyway.
+
+**Canonical (blocking) pattern** — useful as a reference, but we will NOT use this directly because it kills our streaming UX:
+
+```ts
+let response = await anthropic.messages.create({
+  model: 'claude-sonnet-4-6', max_tokens: 4096, tools, messages,
+});
+
+while (response.stop_reason === 'tool_use') {
+  const toolResults = await composio.provider.handleToolCalls(USER_ID, response);
+  messages.push({ role: 'assistant', content: response.content });
+  messages.push(...toolResults);
+  response = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 4096, tools, messages });
+}
+```
+
+`handleToolCalls` is **blocking and atomic per Claude turn** — it executes every `tool_use` block, waits, then returns. The frontend would only see results after all tools finish. Bad for our demo.
+
+### 9.4 Hand-rolled loop for per-tool-call SSE events (the version we ship)
+
+For our "furniture pops in piece by piece" demo theater, we iterate `response.content` ourselves and emit SSE events around each `composio.tools.execute()` call:
+
+```ts
+async function* runAgentTurn(userId: string, messages: Anthropic.MessageParam[], tools, sseEmit) {
+  let response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6', max_tokens: 4096, tools, messages,
+  });
+
+  while (response.stop_reason === 'tool_use') {
+    const toolResultBlocks = [];
+
+    for (const block of response.content) {
+      if (block.type !== 'tool_use') continue;
+
+      sseEmit({ type: 'tool_call', name: block.name, input: block.input, id: block.id });
+
+      const result = await composio.tools.execute(block.name, {
+        userId,
+        arguments: block.input,
+      });
+
+      sseEmit({ type: 'tool_result', id: block.id, result: result.data });
+
+      toolResultBlocks.push({
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: JSON.stringify(result.data),
+      });
+    }
+
+    messages.push({ role: 'assistant', content: response.content });
+    messages.push({ role: 'user', content: toolResultBlocks });
+
+    response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6', max_tokens: 4096, tools, messages,
+    });
+  }
+
+  // Stream final text via separate Anthropic stream API if desired
+  sseEmit({ type: 'assistant_message', text: extractText(response) });
+}
+```
+
+This is ~80 lines total for our `/chat` route. Each `tool_call` event from the server triggers an immediate three.js scene update on the client.
+
+### 9.5 Pre-built integrations (Phase 2)
+
+For the deferred Gmail / Notion finale work:
+
+- Toolkits: `gmail`, `notion`, `googlecalendar` — load at session creation
+- Tool slugs: `GMAIL_CREATE_EMAIL_DRAFT`, `NOTION_CREATE_PAGE`, `GOOGLECALENDAR_EVENTS_CREATE` (SCREAMING_SNAKE_CASE)
+- Auth: Composio's hosted OAuth (no Google Cloud project required) — set up via Auth Config in the dashboard
+
+```ts
+const session = await composio.create('demo_user', {
+  toolkits: ['gmail', 'notion'],
+});
+```
+
+### 9.6 Auth model (single demo user)
+
+Hierarchy: **Auth Config** (dashboard) → **Connected Account** (per `userId`) → tools auto-resolve credentials by `userId`.
+
+**Hackathon-simplest path:**
+1. Create the Composio account; in dashboard, create Auth Configs for any pre-built toolkits we need (Phase 2 only — skip for P0)
+2. Hard-code `USER_ID = 'demo_user'` everywhere
+3. For P0: no pre-built toolkit auth needed — only custom tools
+4. For Phase 2: manually click "Connect Gmail" in dashboard once for `demo_user`, then any `tools.execute('GMAIL_CREATE_EMAIL_DRAFT', { userId: 'demo_user', ... })` works
+
+### 9.7 Day-1 spike (highest single-risk item)
+
+**Spike scope (~2 hours):**
+1. `npm install @composio/core@0.9.0 @composio/anthropic@0.9.0 @anthropic-ai/sdk zod`
+2. Set `COMPOSIO_API_KEY` and `ANTHROPIC_API_KEY` env vars
+3. Register ONE custom tool (`SEARCH_FURNITURE`) with a stub handler returning fixed data
+4. Run the hand-rolled loop in §9.4 against a fake `sseEmit` (just `console.log`)
+5. Verify: agent receives the tool, calls it correctly, results flow back, conversation terminates
+6. **Then** wire into a Next.js API route with real SSE → trigger from a curl/browser → confirm `tool_call` events arrive on the client before the turn completes
+
+**If the spike fails** (Composio runtime conflicts with our pattern): fall back to using `@composio/core` only for custom-tool definitions (extracting their JSON Schema) and call Anthropic SDK directly without `composio.provider`. We still get to claim Composio integration via custom tools and Phase 2 pre-built toolkits.
+
+**Composio docs access:** team has MCP available — use it during the spike to look up exact API shapes if v0.9.0 differs from this PRD.
 
 ## 10. Frontend Architecture
 
@@ -400,6 +541,8 @@ Net effect: most turns add ~200-500 input tokens beyond the cached prefix. Agent
 
 **SSE over WebSocket.** One-way server→client streaming is exactly the shape; WebSocket adds reconnection/duplex complexity for no benefit. User drags use plain REST `POST /placements/:id`.
 
+**Important:** the SSE event stream must emit per-tool-call events as they execute, NOT per-turn. This requires the hand-rolled agent loop in §9.4 — we do NOT use `composio.provider.handleToolCalls` because it's blocking and atomic per turn. Each Composio `tools.execute(...)` call is wrapped with `tool_call` / `tool_result` SSE emissions so the client can update the three.js scene incrementally.
+
 ## 12. Vendor Portal & Marketplace
 
 ### 12.1 `/vendor` — official vendor portal
@@ -463,8 +606,9 @@ UI renders an order summary screen:
 | 3D rendering | three.js + react-three-fiber + drei |
 | Styling | Tailwind |
 | Backend | Next.js API routes (Node.js) |
-| Agent runtime | Composio (with Anthropic SDK fallback if needed) |
-| LLM | Claude Sonnet 4.6 |
+| Agent runtime | Hand-rolled loop (§9.4); `@composio/core@0.9.0` + `@composio/anthropic@0.9.0` for tool defs and execution |
+| LLM SDK | `@anthropic-ai/sdk` (direct), Claude Sonnet 4.6 |
+| Tool schema language | Zod (auto-converted to JSON Schema by Composio) |
 | Streaming | SSE (Server-Sent Events) |
 | Catalog storage | `furniture.json` in memory |
 | Session storage | In-memory, per-process |
@@ -503,7 +647,9 @@ Everything in §3-§14. Ships at hackathon end.
 |---|---|---|
 | RoomPlan scan quality varies / wrong-handedness on import | Medium | Pre-bake the demo room; verify schema conversion on day 1 with one real scan |
 | ABO model orientation inconsistent | High | Hand-correct during catalog curation; narrow to ~30 items where orientation works |
-| Composio runtime conflicts with our SSE streaming | Medium | Day-1 spike to verify; fallback = raw Anthropic SDK + Composio for tool definitions only |
+| Composio runtime conflicts with our SSE streaming | Low (resolved by hand-rolled loop in §9.4) | Day-1 spike validates; if `tools.execute` API changes in v3, fall back to extracting JSON Schema from custom tools and dispatching manually |
+| Composio SDK breaking change between now and demo | Medium | Pin exact versions (`@composio/core@0.9.0`, `@composio/anthropic@0.9.0`) — no `^` or `~` |
+| Custom tools lost on serverless cold start | Medium | Register at module-load in `lib/composio.ts` singleton; if deploying to Vercel, register inside route handler factory |
 | Agent hallucinates item IDs not in catalog | Medium | All `place_item` calls validate against catalog; structured failure forces retry |
 | Agent stuck in placement retry loop | Low | Max 3 retries per item per turn enforced in agent loop |
 | three.js GLB load failures mid-demo | Medium | Pre-load all models on app boot; fallback box geometry on error |
@@ -523,15 +669,17 @@ Everything in §3-§14. Ships at hackathon end.
   - Render thumbnails, orientation-correct
   - Hand-tag style
   - Commit `furniture.json` + `/public/models/`
-- [ ] Verify Composio account + API keys
+- [ ] Composio account: sign up at platform.composio.dev, generate API key
+- [ ] (Phase 2 only — can skip for P0) Composio dashboard: create Auth Configs for Gmail / Notion using hosted OAuth, manually click "Connect" for `demo_user`
 - [ ] Confirm Anthropic API access + Sonnet 4.6 model availability
+- [ ] Pin SDK versions in `package.json`: `@composio/core@0.9.0`, `@composio/anthropic@0.9.0`
 - [ ] One team member installs Xcode + has LiDAR iPhone + Apple developer account ready
 
 ## 18. Day-1 Spikes (first 4 hours of hackathon)
 
 In order, parallel where possible:
 
-1. **Composio runtime validation spike** (2h) — register one custom tool, run a Sonnet 4.6 agent loop end-to-end through Composio, confirm streaming works. Decide framework.
+1. **Composio + hand-rolled loop spike** (2h) — see §9.7. Register one custom tool, run the §9.4 hand-rolled loop, verify per-tool-call SSE events arrive on a browser client before the turn completes. This is the highest single-risk item; do it first.
 2. **three.js room render spike** (2h) — load `room.json`, render walls + floor + detected objects, get orbit controls working. Verify schema is right shape.
 3. **Single-tool agent loop spike** (2h) — wire `search_furniture` end-to-end: user message → agent → tool call → result → response. Once this works, the rest is mechanical.
 4. **Occupancy grid spike** (1h) — build the grid from `room.json`, render an overlay showing free vs blocked cells, verify `query_space.clear_area` returns sensible results.
