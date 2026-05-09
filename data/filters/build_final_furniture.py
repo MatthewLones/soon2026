@@ -35,7 +35,8 @@ from pathlib import Path
 INPUT_PATH = Path(__file__).parent / "filtered.json"
 CACHE_PATH = Path(__file__).parent / "url_cache.json"
 RAW_PATH = Path(__file__).parent / "furniture1.json"
-OUTPUT_PATH = Path(__file__).parent / "final_furniture.json"
+# Write the catalog one level up so the app reads a single canonical file.
+OUTPUT_PATH = Path(__file__).parent.parent / "final_furniture.json"
 USD_URL_PREFIX = "https://www.amazon.com/"
 
 # Hand-picked anchors used for synthetic prices. Real cached prices are
@@ -55,8 +56,8 @@ DEFAULT_BASE = {
     "table": 79,
 }
 
-SPREAD = 100  # +/- range around the base when generating synthetic prices
-RNG_SEED = 20260509  # deterministic output across runs
+SPREAD = 30  # +/- range around the base when generating synthetic prices
+RNG_SEED = None  # None = re-run rolls fresh synthetic prices; pin to an int for reproducibility
 
 
 def load_cache():

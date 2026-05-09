@@ -39,7 +39,8 @@ from pathlib import Path
 import requests
 
 INPUT_PATH = Path(__file__).parent / "filtered.json"
-OUTPUT_PATH = Path(__file__).parent / "final_furniture.json"
+# Write the catalog one level up so the app reads a single canonical file.
+OUTPUT_PATH = Path(__file__).parent.parent / "final_furniture.json"
 CACHE_PATH = Path(__file__).parent / "url_cache.json"
 
 MAX_PER_CATEGORY = 999            # effectively uncapped: take every live USD item
