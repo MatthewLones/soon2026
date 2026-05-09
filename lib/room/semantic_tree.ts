@@ -216,8 +216,12 @@ function rayCastFree(grid: Grid, origin: Vec2, dir: Vec2, max_m = 8): number {
 }
 
 /** For a single free span, compute the clearance into the room — the minimum
- *  of three inward rays (start, midpoint, end of span). The single-ray version
- *  silently lies on protrusions and concave rooms (Plan-agent finding §1). */
+ *  of three inward rays cast from positions safely *inside* the span (away
+ *  from the wall endpoints, which usually coincide with perpendicular wall
+ *  corners). Casting near the endpoints immediately hits the perpendicular
+ *  wall's rasterized cells and returns ~0 — a false negative that prunes
+ *  otherwise-fine walls. We back off ≥ 30 cm from each end (or collapse to
+ *  the midpoint for short spans). */
 function spanClearance(
   grid: Grid,
   axis: WallAxis,
@@ -230,10 +234,16 @@ function spanClearance(
     const pz = axis.p0.z + axis.axis.z * t_m + inward.z * inset_m;
     return rayCastFree(grid, { x: px, z: pz }, inward);
   };
-  const start = sample(span.start_m + 0.01);
-  const mid = sample((span.start_m + span.end_m) / 2);
-  const end = sample(span.end_m - 0.01);
-  return Math.min(start, mid, end);
+  const length = span.end_m - span.start_m;
+  const mid = (span.start_m + span.end_m) / 2;
+  const CORNER_BACKOFF = 0.30;
+  if (length < CORNER_BACKOFF * 2.2) {
+    // Short span — only the midpoint is safely inside.
+    return sample(mid);
+  }
+  const inner_start = span.start_m + CORNER_BACKOFF;
+  const inner_end = span.end_m - CORNER_BACKOFF;
+  return Math.min(sample(inner_start), sample(mid), sample(inner_end));
 }
 
 // ---------- Wall node construction ----------

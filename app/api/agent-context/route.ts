@@ -42,6 +42,15 @@ export async function GET() {
     treeSchemaDoc: TREE_SCHEMA_DOC,
     defaultRolePrompt: DEFAULT_ROLE_PROMPT,
     placements: s.placements,
+    // The LLM's accumulated design (assignments + last solve outcome). The
+    // panel uses this to enable the reset button and to show "N pending in
+    // design" alongside the placement count. Without surfacing this, the
+    // user can't tell that the agent still has intent stored when reset
+    // looks like a no-op.
+    design: {
+      assignmentCount: s.design.assignments.length,
+      hasOutcome: s.design.outcome !== null,
+    },
     // The renderer is in raw RoomPlan world coords; agent state is in
     // floor-centered coords. Add originOffset to convert: world = floor + offset.
     originOffset: s.room.origin_offset,

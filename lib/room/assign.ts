@@ -221,7 +221,7 @@ export function assignToWall(input: AssignToWallInput): AssignResult {
   // Compute world coords from the wall axis.
   const wall = s.room.walls.find((w) => w.id === node.id);
   if (!wall) return { ok: false, reason: 'wall_not_found', detail: `wall ${node.id} missing from room data` };
-  const axis = wallAxisOf(wall);
+  const axis = wallAxisOf(wall, { floor_polygon: s.room.floor_polygon });
   const t_m = alignmentOffsetWithinSpan(span, input.alignment ?? 'center', item.dimensions.w, input.offset_m ?? 0);
   const yaw = chooseWallYaw(item, axis);
   const inwardOffset = item.dimensions.d / 2 + WALL_BACK_OFFSET;
