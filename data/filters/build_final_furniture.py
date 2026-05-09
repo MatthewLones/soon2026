@@ -34,7 +34,9 @@ from pathlib import Path
 
 INPUT_PATH = Path(__file__).parent / "filtered.json"
 CACHE_PATH = Path(__file__).parent / "url_cache.json"
-OUTPUT_PATH = Path(__file__).parent / "final_furniture.json"
+RAW_PATH = Path(__file__).parent / "furniture1.json"
+# Write the catalog one level up so the app reads a single canonical file.
+OUTPUT_PATH = Path(__file__).parent.parent / "final_furniture.json"
 USD_URL_PREFIX = "https://www.amazon.com/"
 
 # Hand-picked anchors used for synthetic prices. Real cached prices are
@@ -54,8 +56,8 @@ DEFAULT_BASE = {
     "table": 79,
 }
 
-SPREAD = 100  # +/- range around the base when generating synthetic prices
-RNG_SEED = 20260509  # deterministic output across runs
+SPREAD = 30  # +/- range around the base when generating synthetic prices
+RNG_SEED = None  # None = re-run rolls fresh synthetic prices; pin to an int for reproducibility
 
 
 def load_cache():
@@ -91,6 +93,43 @@ def category_bases():
     return {cat: float(base) for cat, base in DEFAULT_BASE.items()}
 
 
+def english_bullet_text(item):
+    """Concatenate the English bullet_point values for one ABO item.
+    Prefers en_US, falls back to any en_* tag. Returns '' if none exist."""
+    bullets = item.get("bullet_point")
+    if not isinstance(bullets, list):
+        return ""
+    en_us = [b.get("value") for b in bullets
+             if isinstance(b, dict) and b.get("language_tag") == "en_US"]
+    if en_us:
+        return " ".join(v for v in en_us if v)
+    any_en = [b.get("value") for b in bullets
+              if isinstance(b, dict) and str(b.get("language_tag", "")).startswith("en_")]
+    return " ".join(v for v in any_en if v)
+
+
+def load_descriptions(needed_item_ids):
+    """One pass over furniture1.json. Returns {item_id: english_description}
+    for the items in `needed_item_ids` that have at least some English text."""
+    descriptions = {}
+    with RAW_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            iid = item.get("item_id")
+            if iid not in needed_item_ids:
+                continue
+            text = english_bullet_text(item)
+            if text:
+                descriptions[iid] = text
+    return descriptions
+
+
 def synthetic_price(base, rng):
     """Random price in [max(9, base-SPREAD), base+SPREAD] ending in 9."""
     low = max(9, int(base) - SPREAD)
@@ -116,8 +155,15 @@ def main():
         print(f"  {cat:<18} ${bases[cat]:.0f}")
     print()
 
+    needed_ids = {item.get("item_id") for item in items if item.get("item_id")}
+    print(f"Loading English descriptions for {len(needed_ids)} candidate item_ids "
+          f"from {RAW_PATH.name}...")
+    descriptions = load_descriptions(needed_ids)
+    print(f"  Found English text for {len(descriptions)}/{len(needed_ids)} items.")
+    print()
+
     kept = []
-    counts = defaultdict(lambda: {"real": 0, "synthetic": 0, "dead": 0})
+    counts = defaultdict(lambda: {"real": 0, "synthetic": 0, "dead": 0, "no_en": 0})
 
     for item in items:
         url = item["url"]
@@ -135,6 +181,12 @@ def main():
             # Unknown category somehow — skip rather than fabricate blindly.
             continue
 
+        description = descriptions.get(item.get("item_id"))
+        if not description:
+            # User wants only items with English descriptions in the catalog.
+            counts[cat]["no_en"] += 1
+            continue
+
         if entry and entry.get("live") and entry.get("price_usd") is not None:
             item["price_usd"] = float(entry["price_usd"])
             item["price_as_of"] = entry.get("checked_at") or today
@@ -146,6 +198,7 @@ def main():
             item["is_synthetic_price"] = True
             counts[cat]["synthetic"] += 1
 
+        item["description"] = description
         kept.append(item)
 
     with OUTPUT_PATH.open("w", encoding="utf-8") as f_out:
@@ -153,10 +206,11 @@ def main():
             f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     print(f"Wrote {len(kept)} items to {OUTPUT_PATH.name}")
-    print("Per-category breakdown (real / synthetic / dead-excluded):")
+    print("Per-category breakdown (real / synthetic / dead-excluded / no-EN-excluded):")
     for cat in sorted(counts):
         c = counts[cat]
-        print(f"  {cat:<18} {c['real']:3} real  {c['synthetic']:3} synthetic  {c['dead']:3} dead")
+        print(f"  {cat:<18} {c['real']:3} real  {c['synthetic']:3} synthetic  "
+              f"{c['dead']:3} dead  {c['no_en']:3} no-EN")
 
 
 if __name__ == "__main__":
