@@ -1,9 +1,12 @@
 'use client';
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, Html, PointerLockControls } from '@react-three/drei';
-import { useMemo, useRef, useState, useEffect } from 'react';
+import { OrbitControls, Grid, Html, PointerLockControls, useGLTF } from '@react-three/drei';
+import { Suspense, useMemo, useRef, useState, useEffect } from 'react';
 import * as THREE from 'three';
+import type { Placement } from '@/lib/room/grid';
+import type { CatalogItem } from '@/lib/agent/catalog';
+import type { Vec3 } from '@/lib/room/normalize';
 import {
   type RoomPlanRaw,
   type Surface,
@@ -33,9 +36,18 @@ const WALK_SPEED = 3.5; // m/s
 export default function ScanCanvas({
   room,
   splatUrl,
+  placements = [],
+  catalog = [],
+  originOffset,
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
+  /** Floor-centered placements from the agent. */
+  placements?: Placement[];
+  catalog?: CatalogItem[];
+  /** World-space position of the floor centroid; used to convert
+   *  floor-centered placement coords back to renderer world coords. */
+  originOffset?: Vec3;
 }) {
   const cameraTarget = useMemo<[number, number, number]>(() => {
     if (room.floors[0]) {
@@ -166,6 +178,16 @@ export default function ScanCanvas({
 
         {room.objects.map((o) => (
           <ObjectBox key={o.identifier} object={o} mode={mode} viewMode={viewMode} />
+        ))}
+
+        {placements.map((p) => (
+          <PlacementMesh
+            key={p.id}
+            placement={p}
+            catalog={catalog}
+            originOffset={originOffset}
+            floorY={floorY}
+          />
         ))}
 
         {splatUrl && viewMode !== 'wireframe' && (
@@ -621,6 +643,102 @@ function ObjectBox({
         >
           {cat}
           {ghosted ? ' · low' : ''}
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+/** Render an agent-placed catalog item as a GLB model.
+ *  Placement coords are floor-centered; the renderer is in raw RoomPlan world
+ *  coords, so we add originOffset.x/z to translate. The GLB sits on the floor
+ *  (Y = floorY) regardless of the placement's stored Y. */
+function PlacementMesh({
+  placement,
+  catalog,
+  originOffset,
+  floorY,
+}: {
+  placement: Placement;
+  catalog: CatalogItem[];
+  originOffset?: Vec3;
+  floorY: number;
+}) {
+  const item = catalog.find((c) => c.id === placement.catalog_item_id);
+  const offsetX = originOffset?.x ?? 0;
+  const offsetZ = originOffset?.z ?? 0;
+  const worldX = placement.position.x + offsetX;
+  const worldZ = placement.position.z + offsetZ;
+  const url = item?.model_path && item.model_path.endsWith('.glb') ? item.model_path : null;
+
+  // Box fallback for stub items (model_path: "box:WxHxD") or while the GLB
+  // suspends. Sized from the placement dimensions, sat on the floor.
+  const fallback = (
+    <group position={[worldX, floorY + placement.dimensions.h / 2, worldZ]} rotation={[0, placement.rotation_y, 0]}>
+      <mesh castShadow>
+        <boxGeometry args={[placement.dimensions.w, placement.dimensions.h, placement.dimensions.d]} />
+        <meshStandardMaterial color="#a16207" roughness={0.7} transparent opacity={0.85} />
+      </mesh>
+      <Html
+        center
+        distanceFactor={8}
+        position={[0, placement.dimensions.h / 2 + 0.15, 0]}
+        style={{ pointerEvents: 'none' }}
+      >
+        <div className="whitespace-nowrap rounded bg-amber-600/85 px-2 py-0.5 text-[10px] font-medium text-white">
+          {item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
+        </div>
+      </Html>
+    </group>
+  );
+
+  if (!url) return fallback;
+  return (
+    <Suspense fallback={fallback}>
+      <PlacedGlb
+        url={url}
+        worldX={worldX}
+        worldZ={worldZ}
+        floorY={floorY}
+        rotationY={placement.rotation_y}
+        label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
+        labelHeight={placement.dimensions.h}
+      />
+    </Suspense>
+  );
+}
+
+function PlacedGlb({
+  url,
+  worldX,
+  worldZ,
+  floorY,
+  rotationY,
+  label,
+  labelHeight,
+}: {
+  url: string;
+  worldX: number;
+  worldZ: number;
+  floorY: number;
+  rotationY: number;
+  label: string;
+  labelHeight: number;
+}) {
+  const gltf = useGLTF(url);
+  // Clone so the same GLB used in multiple places renders independently.
+  const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
+  return (
+    <group position={[worldX, floorY, worldZ]} rotation={[0, rotationY, 0]}>
+      <primitive object={scene} castShadow receiveShadow />
+      <Html
+        center
+        distanceFactor={8}
+        position={[0, labelHeight + 0.15, 0]}
+        style={{ pointerEvents: 'none' }}
+      >
+        <div className="whitespace-nowrap rounded bg-emerald-700/85 px-2 py-0.5 text-[10px] font-medium text-white">
+          {label}
         </div>
       </Html>
     </group>
