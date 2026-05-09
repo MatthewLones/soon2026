@@ -60,6 +60,12 @@ export type FreeSpan = {
 
 export type WallNode = {
   id: string;
+  /** Stable, human-friendly letter label (A, B, C, ..., Z, AA, AB, ...).
+   *  Same wall always gets the same letter across tree rebuilds within a
+   *  session, so the user can say "put a sofa on wall A" and the LLM can
+   *  translate to the underlying id. Walls shared between rooms share a
+   *  label. Computed at tree build time (see assignWallLabels). */
+  label: string;
   facing: Heading;
   /** Direction *into* the room (opposite of `facing`). */
   inward: Heading;
@@ -95,6 +101,9 @@ export type ZoneNode = {
 
 export type SemanticRoom = {
   id: string;
+  /** 1-indexed user-facing room number ("Room 1", "Room 2"). Stable across
+   *  tree rebuilds within a session — assigned in detection order. */
+  number: number;
   bounds: { min: Vec2; max: Vec2 };
   area_m2: number;
   /** Boundary outline of the detected room (axis-aligned cell-grid trace).
@@ -114,6 +123,42 @@ export type SemanticTree = {
   schema_version: 1;
   building: { id: string; rooms: SemanticRoom[] };
 };
+
+// ---------- Wall labels (Excel-column style) ----------
+
+/** Convert a 0-indexed integer to an Excel-style letter label.
+ *  0 → "A", 25 → "Z", 26 → "AA", 27 → "AB", etc. */
+function toLetter(idx: number): string {
+  let n = idx;
+  let out = '';
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
+
+/** Assign letter labels to walls. Stable per scan: walls are keyed by their
+ *  underlying wall id (the same wall in multiple rooms gets ONE letter); the
+ *  ordering follows their first appearance during room iteration, which is
+ *  deterministic for a given room (largest-area-first), so the same scan
+ *  always yields the same A/B/C assignment. */
+function buildWallLabelMap(rooms: DetectedRoom[]): Map<string, string> {
+  const seen = new Map<string, string>();
+  let nextIdx = 0;
+  for (const r of rooms) {
+    // Iterate the wall ids in a deterministic order — sort within the room
+    // by id so we don't rely on Set iteration order (it's insertion-order
+    // per ECMA, but Sets are populated by detect_rooms.ts via raster sweep
+    // which is itself deterministic; sorting locks it).
+    const ids = Array.from(r.wallIds).sort();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.set(id, toLetter(nextIdx++));
+    }
+  }
+  return seen;
+}
 
 // ---------- Heading helpers ----------
 
@@ -254,7 +299,7 @@ const MIN_FREE_SPAN = 0.30; // m — drop spans shorter than this
 
 function buildWallNode(
   axis: WallAxis,
-  wall: { id: string; height_m: number; facing: Heading; curved: boolean },
+  wall: { id: string; label: string; height_m: number; facing: Heading; curved: boolean },
   features: WallFeature[],
   axisObstacles: Interval[],
   grid: Grid
@@ -263,6 +308,7 @@ function buildWallNode(
   if (!placeable) {
     return {
       id: wall.id,
+      label: wall.label,
       facing: wall.facing,
       inward: OPPOSITE_HEADING[wall.facing],
       length_m: round2(axis.length_m),
@@ -298,6 +344,7 @@ function buildWallNode(
 
   const node: WallNode = {
     id: wall.id,
+    label: wall.label,
     facing: wall.facing,
     inward: OPPOSITE_HEADING[wall.facing],
     length_m: round2(axis.length_m),
@@ -351,6 +398,9 @@ function buildObjectNode(
 
 export function buildSemanticTree(room: Room, placements: Placement[]): SemanticTree {
   const detected = buildDetectedRooms(room);
+  // Stable letter labels for walls; same wall id always gets the same letter
+  // for a given scan / detection result.
+  const wallLabels = buildWallLabelMap(detected);
   const allAxes = buildWallAxes(room);
   // One grid for the whole room — buildGrid is < 1 ms and includes walls,
   // kept objects, and placements.
@@ -419,6 +469,7 @@ export function buildSemanticTree(room: Room, placements: Placement[]): Semantic
           axis,
           {
             id: wall.id,
+            label: wallLabels.get(wall.id) ?? '?',
             height_m: wall.dimensions.h,
             facing: wall.heading,
             curved: !!wall.curve,
@@ -448,8 +499,12 @@ export function buildSemanticTree(room: Room, placements: Placement[]): Semantic
     // boundary cell).
     const placedNodes: ObjectNode[] = [];
 
+    // Parse the room number from the id ("room_0" → 1, "room_1" → 2, ...).
+    const numMatch = /(\d+)$/.exec(d.id);
+    const number = numMatch ? parseInt(numMatch[1], 10) + 1 : 1;
     return {
       id: d.id,
+      number,
       bounds: d.bounds,
       area_m2: d.area_m2,
       polygon: d.polygon,

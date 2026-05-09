@@ -72,6 +72,8 @@ export default function ScanCanvas({
   tree,
   hoveredNodeId,
   onNodeHover,
+  labelsMode = false,
+  verboseMode = false,
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
@@ -90,12 +92,16 @@ export default function ScanCanvas({
   /** Catalog item id currently being dragged from the panel (HTML5 DnD).
    *  Used to render the 3D ghost preview while hovering over the canvas. */
   draggingCatalogItemId?: string | null;
-  /** Semantic tree for judge-mode overlay; null when debug mode is off. */
+  /** Semantic tree for the overlays; null when both modes are off. */
   tree?: SemanticTree | null;
   /** Currently hovered node id (cross-pane sync with TreeDebugPanel). */
   hoveredNodeId?: string | null;
   /** Bubble hover events from 3D overlay back up to the panel. */
   onNodeHover?: (id: string | null) => void;
+  /** Show the clean letter labels ("A", "Room 1") for natural-language chat. */
+  labelsMode?: boolean;
+  /** Show the verbose debug breakdown (compartments, free spans, clearances). */
+  verboseMode?: boolean;
 }) {
   const cameraTarget = useMemo<[number, number, number]>(() => {
     if (room.floors[0]) {
@@ -391,7 +397,7 @@ export default function ScanCanvas({
           <SplatLayer url={splatUrl} visible={true} />
         )}
 
-        {tree && (
+        {tree && (labelsMode || verboseMode) && (
           <TreeDebugOverlay
             tree={tree}
             room={room}
@@ -401,6 +407,8 @@ export default function ScanCanvas({
             ceilingHeight={ceilingHeight}
             hoveredNodeId={hoveredNodeId ?? null}
             onNodeHover={onNodeHover}
+            labelsMode={labelsMode}
+            verboseMode={verboseMode}
           />
         )}
 

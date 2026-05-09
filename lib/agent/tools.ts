@@ -83,17 +83,21 @@ export async function registerTools(): Promise<void> {
     slug: 'LIST_ROOMS',
     name: 'List rooms in the building',
     description:
-      'Returns the high-level building summary: each room with its id, area in m², and counts ' +
-      'of walls / kept objects / placements. Use this to decide which room to design in. Cheap.',
+      'Returns the high-level building summary: each room with its id, user-facing number ' +
+      '("Room 1", "Room 2"), area in m², and counts of walls / kept objects / placements. Walls ' +
+      'inside a room have human-friendly letter labels (A, B, C, ...) — see INSPECT_ROOM. The ' +
+      'user may refer to "wall A" or "Room 2" in chat; translate those to ids when calling tools.',
     inputParams: z.object({}),
     execute: async () => {
       const tree = getCachedTree();
       return ok({
         rooms: tree.building.rooms.map((r) => ({
           id: r.id,
+          number: r.number,
           area_m2: r.area_m2,
           wall_count: r.walls.length,
           placeable_wall_count: r.walls.filter((w) => w.placeable).length,
+          wall_labels: r.walls.map((w) => w.label),
           object_count: r.objects.length,
           placement_count: r.placements.length,
           door_count: r.door_ids.length,
@@ -107,9 +111,11 @@ export async function registerTools(): Promise<void> {
     slug: 'INSPECT_ROOM',
     name: 'Inspect a room\'s walls, objects, and placements',
     description:
-      'Returns full details of a single room: walls (with free_spans, features, suggests), kept objects ' +
-      '(with free_space_around in local frame), placements, and door/opening ids bordering this room. ' +
-      'Use this AFTER LIST_ROOMS to drill into the room you want to design.',
+      'Returns full details of a single room: walls (each with a letter label A/B/C..., free_spans, ' +
+      'features, suggests), kept objects (with free_space_around in local frame), placements, and ' +
+      'door/opening ids bordering this room. Use this AFTER LIST_ROOMS to drill into the room you ' +
+      'want to design. The wall.label is what the user calls walls in chat ("put a sofa on wall A"); ' +
+      'translate those to wall.id when calling ADD_TO_WALL.',
     inputParams: z.object({ room_id: z.string() }),
     execute: async (input) => {
       const tree = getCachedTree();

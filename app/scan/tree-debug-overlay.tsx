@@ -48,6 +48,14 @@ type Props = {
   ceilingHeight: number;
   hoveredNodeId: string | null;
   onNodeHover?: (id: string | null) => void;
+  /** Show clean letter labels (A, B, C...) on each wall + Room # in the
+   *  middle of each room. Designed for natural-language conversation
+   *  ("put a sofa on wall A"). */
+  labelsMode?: boolean;
+  /** Show the full debug breakdown — compartment AABBs, wall HUDs with id /
+   *  facing / length, free-span markers, side-clearance arrows, polygon
+   *  fills. Intended for verifying the algorithm's interpretation. */
+  verboseMode?: boolean;
 };
 
 export default function TreeDebugOverlay({
@@ -59,6 +67,8 @@ export default function TreeDebugOverlay({
   ceilingHeight,
   hoveredNodeId,
   onNodeHover,
+  labelsMode = false,
+  verboseMode = true,
 }: Props) {
   const offX = originOffset?.x ?? 0;
   const offZ = originOffset?.z ?? 0;
@@ -106,6 +116,8 @@ export default function TreeDebugOverlay({
           wallByTreeId={wallByTreeId}
           objectByTreeId={objectByTreeId}
           placementByTreeId={placementByTreeId}
+          labelsMode={labelsMode}
+          verboseMode={verboseMode}
         />
       ))}
     </group>
@@ -123,6 +135,8 @@ function RoomLayer({
   wallByTreeId,
   objectByTreeId,
   placementByTreeId,
+  labelsMode,
+  verboseMode,
 }: {
   room: SemanticRoom;
   color: string;
@@ -134,6 +148,8 @@ function RoomLayer({
   wallByTreeId: Map<string, RoomPlanRaw['walls'][number]>;
   objectByTreeId: Map<string, RoomPlanRaw['objects'][number]>;
   placementByTreeId: Map<string, Placement>;
+  labelsMode: boolean;
+  verboseMode: boolean;
 }) {
   const isHovered = hoveredNodeId === room.id;
   // Compartment AABB in world coords.
@@ -146,8 +162,10 @@ function RoomLayer({
 
   return (
     <group>
-      {/* Filled polygon footprint on the floor (the actual flood-fill outline) */}
-      {room.polygon.length >= 3 && (
+      {/* Filled polygon footprint on the floor — shown whenever either mode
+          is on. In labels mode it's the visual identifier for "this is Room
+          N"; verbose mode gets it for free. */}
+      {(labelsMode || verboseMode) && room.polygon.length >= 3 && (
         <RoomPolygonFloor
           polygon={room.polygon}
           offsetX={offset.x}
@@ -159,37 +177,61 @@ function RoomLayer({
         />
       )}
 
-      {/* Compartment AABB wireframe (still useful for "how big is the bbox") */}
-      <CompartmentWire
-        minX={minX}
-        maxX={maxX}
-        minZ={minZ}
-        maxZ={maxZ}
-        floorY={floorY}
-        height={ceilingHeight}
-        color={isHovered ? HOVER : color}
-        onPointerOver={() => onNodeHover?.(room.id)}
-        onPointerOut={() => onNodeHover?.(null)}
-      />
+      {/* Compartment AABB wireframe (verbose only). */}
+      {verboseMode && (
+        <CompartmentWire
+          minX={minX}
+          maxX={maxX}
+          minZ={minZ}
+          maxZ={maxZ}
+          floorY={floorY}
+          height={ceilingHeight}
+          color={isHovered ? HOVER : color}
+          onPointerOver={() => onNodeHover?.(room.id)}
+          onPointerOut={() => onNodeHover?.(null)}
+        />
+      )}
 
-      {/* Room id label, hovering at ceiling height */}
-      <Html
-        position={[cx, floorY + ceilingHeight - 0.1, cz]}
-        center
-        occlude={false}
-        zIndexRange={[40, 0]}
-      >
-        <div
-          onMouseEnter={() => onNodeHover?.(room.id)}
-          onMouseLeave={() => onNodeHover?.(null)}
-          className={`pointer-events-auto cursor-default whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-semibold shadow ${
-            isHovered ? 'bg-fuchsia-500 text-white' : 'text-neutral-900'
-          }`}
-          style={!isHovered ? { backgroundColor: color } : undefined}
+      {/* Room label. In labels mode: prominent "Room N" at floor centre.
+          In verbose mode (without labels): smaller "{id} · {area}" at
+          ceiling. Both: clickable to highlight the room. */}
+      {labelsMode ? (
+        <Html
+          position={[cx, floorY + 1.5, cz]}
+          center
+          occlude={false}
+          zIndexRange={[40, 0]}
         >
-          {room.id} · {room.area_m2} m²
-        </div>
-      </Html>
+          <div
+            onMouseEnter={() => onNodeHover?.(room.id)}
+            onMouseLeave={() => onNodeHover?.(null)}
+            className={`pointer-events-auto cursor-default whitespace-nowrap rounded-lg px-3 py-1.5 text-[15px] font-bold shadow-lg ${
+              isHovered ? 'bg-fuchsia-500 text-white' : 'bg-white/95 text-neutral-900'
+            }`}
+            style={!isHovered ? { borderLeft: `4px solid ${color}` } : undefined}
+          >
+            Room {room.number}
+          </div>
+        </Html>
+      ) : verboseMode ? (
+        <Html
+          position={[cx, floorY + ceilingHeight - 0.1, cz]}
+          center
+          occlude={false}
+          zIndexRange={[40, 0]}
+        >
+          <div
+            onMouseEnter={() => onNodeHover?.(room.id)}
+            onMouseLeave={() => onNodeHover?.(null)}
+            className={`pointer-events-auto cursor-default whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-semibold shadow ${
+              isHovered ? 'bg-fuchsia-500 text-white' : 'text-neutral-900'
+            }`}
+            style={!isHovered ? { backgroundColor: color } : undefined}
+          >
+            {room.id} · {room.area_m2} m²
+          </div>
+        </Html>
+      ) : null}
 
       {room.walls.map((w) => (
         <WallAnnotation
@@ -200,10 +242,14 @@ function RoomLayer({
           color={color}
           hoveredNodeId={hoveredNodeId}
           onNodeHover={onNodeHover}
+          labelsMode={labelsMode}
+          verboseMode={verboseMode}
         />
       ))}
 
-      {room.objects.map((o) => (
+      {/* Object/placement detail is verbose-only — labels mode keeps the
+          scene clean for the user. */}
+      {verboseMode && room.objects.map((o) => (
         <ObjectAnnotation
           key={`${room.id}-${o.id}`}
           obj={o}
@@ -216,7 +262,7 @@ function RoomLayer({
           onNodeHover={onNodeHover}
         />
       ))}
-      {room.placements.map((o) => (
+      {verboseMode && room.placements.map((o) => (
         <ObjectAnnotation
           key={`${room.id}-${o.id}`}
           obj={o}
@@ -365,6 +411,8 @@ function WallAnnotation({
   color,
   hoveredNodeId,
   onNodeHover,
+  labelsMode,
+  verboseMode,
 }: {
   wall: WallNode;
   rawWall: RoomPlanRaw['walls'][number] | undefined;
@@ -372,6 +420,8 @@ function WallAnnotation({
   color: string;
   hoveredNodeId: string | null;
   onNodeHover?: (id: string | null) => void;
+  labelsMode: boolean;
+  verboseMode: boolean;
 }) {
   if (!rawWall) return null;
   const isHovered = hoveredNodeId === wall.id;
@@ -410,22 +460,25 @@ function WallAnnotation({
       onPointerOver={() => onNodeHover?.(wall.id)}
       onPointerOut={() => onNodeHover?.(null)}
     >
-      {/* Wall axis line at floor level (helps see id placement in walk view) */}
-      <line>
-        <bufferGeometry>
-          <bufferAttribute
-            attach="attributes-position"
-            args={[new Float32Array([p0.x, p0.y, p0.z, p1.x, p1.y, p1.z]), 3]}
-            count={2}
-            array={new Float32Array([p0.x, p0.y, p0.z, p1.x, p1.y, p1.z])}
-            itemSize={3}
-          />
-        </bufferGeometry>
-        <lineBasicMaterial color={labelColor} transparent opacity={isHovered ? 1 : 0.5} />
-      </line>
+      {/* Wall axis line at floor level — verbose only (visual noise in
+          labels mode). */}
+      {verboseMode && (
+        <line>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[new Float32Array([p0.x, p0.y, p0.z, p1.x, p1.y, p1.z]), 3]}
+              count={2}
+              array={new Float32Array([p0.x, p0.y, p0.z, p1.x, p1.y, p1.z])}
+              itemSize={3}
+            />
+          </bufferGeometry>
+          <lineBasicMaterial color={labelColor} transparent opacity={isHovered ? 1 : 0.5} />
+        </line>
+      )}
 
-      {/* Free-span highlights — fatter line at the same level as the axis */}
-      {wall.free_spans.length > 0 && (
+      {/* Free-span highlights — verbose only. */}
+      {verboseMode && wall.free_spans.length > 0 && (
         <lineSegments position={[0, 0.005, 0]}>
           <bufferGeometry>
             <bufferAttribute
@@ -440,27 +493,57 @@ function WallAnnotation({
         </lineSegments>
       )}
 
-      <Html
-        position={[cx, floorY + 1.4, cz]}
-        center
-        occlude={false}
-        zIndexRange={[30, 0]}
-      >
-        <div
-          onMouseEnter={() => onNodeHover?.(wall.id)}
-          onMouseLeave={() => onNodeHover?.(null)}
-          className={`pointer-events-auto cursor-default whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-mono shadow ${
-            isHovered
-              ? 'bg-fuchsia-500 text-white'
-              : wall.placeable
-              ? 'bg-white/95 text-neutral-800'
-              : 'bg-neutral-300/85 text-neutral-500 line-through'
-          }`}
-          style={{ borderLeft: `3px solid ${labelColor}` }}
+      {/* Labels mode: a big bold letter ("A") on a pill above the wall.
+          This is what the user types in chat. */}
+      {labelsMode && wall.placeable && (
+        <Html
+          position={[cx, floorY + 1.0, cz]}
+          center
+          occlude={false}
+          zIndexRange={[35, 0]}
         >
-          {wall.id} · {wall.facing} · {wall.length_m}m
-        </div>
-      </Html>
+          <div
+            onMouseEnter={() => onNodeHover?.(wall.id)}
+            onMouseLeave={() => onNodeHover?.(null)}
+            className={`pointer-events-auto cursor-default flex items-center justify-center whitespace-nowrap rounded-full text-[14px] font-bold shadow-lg ${
+              isHovered ? 'bg-fuchsia-500 text-white' : 'bg-white/95 text-neutral-900'
+            }`}
+            style={{
+              minWidth: 28,
+              height: 28,
+              padding: '0 8px',
+              border: `2px solid ${isHovered ? HOVER : color}`,
+            }}
+          >
+            {wall.label}
+          </div>
+        </Html>
+      )}
+
+      {/* Verbose mode: detailed HUD with id / facing / length / label. */}
+      {verboseMode && (
+        <Html
+          position={[cx, floorY + 1.4, cz]}
+          center
+          occlude={false}
+          zIndexRange={[30, 0]}
+        >
+          <div
+            onMouseEnter={() => onNodeHover?.(wall.id)}
+            onMouseLeave={() => onNodeHover?.(null)}
+            className={`pointer-events-auto cursor-default whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-mono shadow ${
+              isHovered
+                ? 'bg-fuchsia-500 text-white'
+                : wall.placeable
+                ? 'bg-white/95 text-neutral-800'
+                : 'bg-neutral-300/85 text-neutral-500 line-through'
+            }`}
+            style={{ borderLeft: `3px solid ${labelColor}` }}
+          >
+            <span className="font-bold">{wall.label}</span> · {wall.id} · {wall.facing} · {wall.length_m}m
+          </div>
+        </Html>
+      )}
     </group>
   );
 }
