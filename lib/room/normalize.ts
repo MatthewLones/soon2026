@@ -148,15 +148,15 @@ function shortId(prefix: string, identifier: string): string {
   return `${prefix}_${identifier.slice(0, 8).toLowerCase()}`;
 }
 
-function translateSurface<T extends Surface>(s: T, offset: Vec3) {
-  const pos = positionOf(s.transform);
+function translateTransform(transform: number[], offset: Vec3) {
+  const pos = positionOf(transform);
   return {
     pos: {
       x: pos.x - offset.x,
       y: pos.y - offset.y,
       z: pos.z - offset.z,
     } as Vec3,
-    yaw: yawOf(s.transform),
+    yaw: yawOf(transform),
   };
 }
 
@@ -215,7 +215,7 @@ export function normalizeRoom(raw: RoomPlanRaw): Room {
 
   // Walls
   const walls: NormalizedWall[] = raw.walls.map((w) => {
-    const { pos, yaw } = translateSurface(w, offset);
+    const { pos, yaw } = translateTransform(w.transform, offset);
     const { angle: outwardAngle } = outwardNormal(pos, yaw);
     return {
       id: shortId('wall', w.identifier),
@@ -245,7 +245,7 @@ export function normalizeRoom(raw: RoomPlanRaw): Room {
   }
 
   function normalizeOpening(s: Surface, type: 'door' | 'window' | 'opening'): NormalizedSurface {
-    const { pos, yaw } = translateSurface(s, offset);
+    const { pos, yaw } = translateTransform(s.transform, offset);
     return {
       id: shortId(type, s.identifier),
       type,
@@ -263,7 +263,7 @@ export function normalizeRoom(raw: RoomPlanRaw): Room {
 
   // Detected objects: floor-centered (x, z); attributes flattened.
   const detected_objects: NormalizedObject[] = raw.objects.map((obj) => {
-    const { pos, yaw } = translateSurface(obj, offset);
+    const { pos, yaw } = translateTransform(obj.transform, offset);
     const cat = categoryOf(obj.category);
     return {
       id: shortId(cat, obj.identifier),

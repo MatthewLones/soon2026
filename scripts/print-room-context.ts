@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { normalizeRoom } from '../lib/room/normalize';
 import { describeRoom, estimateTokens } from '../lib/room/describe';
+import { compactRoom, COMPACT_ROOM_DOC } from '../lib/room/serialize';
 import type { RoomPlanRaw } from '../lib/roomplan';
 
 async function main() {
@@ -20,19 +21,27 @@ async function main() {
 
   const room = normalizeRoom(raw);
   const summary = describeRoom(room);
+  const compact = compactRoom(room);
+
   const jsonPretty = JSON.stringify(room, null, 2);
-  const jsonCompact = JSON.stringify(room);
+  const compactJSON = JSON.stringify(compact);
 
   console.log('=== Normalized Room JSON (pretty, for eyeballing) ===');
   console.log(jsonPretty);
   console.log('\n=== NL Summary ===');
   console.log(summary);
-  console.log('\n=== Token estimate (sent to LLM as compact JSON) ===');
-  const jsonT = estimateTokens(jsonCompact);
+  console.log('\n=== Compact JSON (what the agent sees) ===');
+  console.log(compactJSON);
+  console.log('\n=== Schema doc (also given to agent) ===');
+  console.log(COMPACT_ROOM_DOC);
+  console.log('\n=== Token estimate ===');
+  const jsonT = estimateTokens(compactJSON);
   const summaryT = estimateTokens(summary);
-  console.log(`JSON (compact): ~${jsonT} tokens (${jsonCompact.length} chars)`);
-  console.log(`Summary:        ~${summaryT} tokens`);
-  console.log(`Total:          ~${jsonT + summaryT} tokens (target < 1500)`);
+  const docT = estimateTokens(COMPACT_ROOM_DOC);
+  console.log(`Compact JSON: ~${jsonT} tokens (${compactJSON.length} chars)`);
+  console.log(`Summary:      ~${summaryT} tokens`);
+  console.log(`Schema doc:   ~${docT} tokens`);
+  console.log(`Total:        ~${jsonT + summaryT + docT} tokens (target < 1500)`);
 }
 
 main().catch((err) => {

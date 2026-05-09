@@ -12,6 +12,7 @@
     "@anthropic-ai/sdk": "0.52.0",
     "@composio/anthropic": "0.9.0",
     "@composio/core": "0.9.0",
+    "@mkkellogg/gaussian-splats-3d": "^0.4.7",
     "@react-three/drei": "^10.0.0",
     "@react-three/fiber": "^9.0.0",
     "next": "16.2.6",

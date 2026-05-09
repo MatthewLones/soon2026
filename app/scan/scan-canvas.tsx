@@ -14,14 +14,29 @@ import {
   worldPointInSurfaceLocal,
   OBJECT_COLORS,
 } from '@/lib/roomplan';
+import {
+  type WallSegment,
+  buildWallSegments,
+  buildObjectSegments,
+  buildHolesByWall,
+  closestPointOnSegment,
+} from '@/lib/room/segments';
+import SplatLayer from './splat-layer';
 
 type Mode = 'orbit' | 'walk';
+type ViewMode = 'wireframe' | 'hybrid' | 'splat';
 
 const PLAYER_RADIUS = 0.35; // ~70cm shoulder-to-shoulder
 const EYE_HEIGHT = 1.65; // average human standing eye height
 const WALK_SPEED = 3.5; // m/s
 
-export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
+export default function ScanCanvas({
+  room,
+  splatUrl,
+}: {
+  room: RoomPlanRaw;
+  splatUrl?: string;
+}) {
   const cameraTarget = useMemo<[number, number, number]>(() => {
     if (room.floors[0]) {
       const { position } = decomposeTransform(room.floors[0].transform);
@@ -30,16 +45,10 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
     return [0, 0, 0];
   }, [room.floors]);
 
-  const holesByWall = useMemo(() => {
-    const map = new Map<string, Surface[]>();
-    for (const w of room.walls) map.set(w.identifier, []);
-    for (const h of [...room.doors, ...room.windows, ...room.openings]) {
-      if (h.parentIdentifier && map.has(h.parentIdentifier)) {
-        map.get(h.parentIdentifier)!.push(h);
-      }
-    }
-    return map;
-  }, [room]);
+  const holesByWall = useMemo(
+    () => buildHolesByWall(room.walls, [...room.doors, ...room.windows, ...room.openings]),
+    [room]
+  );
 
   const orphans = useMemo(() => {
     return [...room.doors, ...room.windows, ...room.openings].filter(
@@ -70,6 +79,7 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
   );
 
   const [mode, setMode] = useState<Mode>('orbit');
+  const [viewMode, setViewMode] = useState<ViewMode>(splatUrl ? 'hybrid' : 'wireframe');
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -79,9 +89,27 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  // When entering walk mode, splats are the most immersive view; in orbit,
+  // hybrid lets the user see both reality and the AI's structural model.
+  useEffect(() => {
+    if (!splatUrl) return;
+    setViewMode((current) => {
+      if (mode === 'walk' && current === 'wireframe') return 'splat';
+      if (mode === 'orbit' && current === 'splat') return 'hybrid';
+      return current;
+    });
+  }, [mode, splatUrl]);
+
   return (
     <>
-      <ModeHud mode={mode} onChange={setMode} room={room} />
+      <ModeHud
+        mode={mode}
+        onChange={setMode}
+        room={room}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        splatAvailable={Boolean(splatUrl)}
+      />
       <Canvas
         shadows
         camera={{
@@ -112,7 +140,7 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
         />
 
         {room.floors.map((f) => (
-          <FloorMesh key={f.identifier} floor={f} />
+          <FloorMesh key={f.identifier} floor={f} viewMode={viewMode} />
         ))}
 
         {room.walls.map((w) => (
@@ -121,6 +149,7 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
             wall={w}
             holes={holesByWall.get(w.identifier) ?? []}
             mode={mode}
+            viewMode={viewMode}
           />
         ))}
 
@@ -130,12 +159,17 @@ export default function ScanCanvas({ room }: { room: RoomPlanRaw }) {
             surface={o}
             color={categoryOf(o.category) === 'window' ? '#9bd1e5' : '#e6c87a'}
             opacity={0.4}
+            viewMode={viewMode}
           />
         ))}
 
         {room.objects.map((o) => (
-          <ObjectBox key={o.identifier} object={o} mode={mode} />
+          <ObjectBox key={o.identifier} object={o} mode={mode} viewMode={viewMode} />
         ))}
+
+        {splatUrl && viewMode !== 'wireframe' && (
+          <SplatLayer url={splatUrl} visible={true} />
+        )}
 
         {mode === 'orbit' ? (
           <OrbitControls target={cameraTarget} makeDefault />
@@ -158,10 +192,16 @@ function ModeHud({
   mode,
   onChange,
   room,
+  viewMode,
+  onViewModeChange,
+  splatAvailable,
 }: {
   mode: Mode;
   onChange: (m: Mode) => void;
   room: RoomPlanRaw;
+  viewMode: ViewMode;
+  onViewModeChange: (v: ViewMode) => void;
+  splatAvailable: boolean;
 }) {
   return (
     <div className="pointer-events-none absolute z-10 m-4 flex flex-col gap-2 text-xs leading-relaxed">
@@ -208,105 +248,43 @@ function ModeHud({
           )}
         </div>
       </div>
+
+      <div className="pointer-events-auto rounded-md bg-white/85 p-3 text-neutral-900 shadow-sm backdrop-blur-sm">
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-500">View</div>
+        <div className="flex gap-2">
+          {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
+            const disabled = !splatAvailable && v !== 'wireframe';
+            return (
+              <button
+                key={v}
+                onClick={() => !disabled && onViewModeChange(v)}
+                disabled={disabled}
+                className={
+                  'rounded px-3 py-1 text-xs font-medium transition ' +
+                  (viewMode === v
+                    ? 'bg-neutral-900 text-white'
+                    : disabled
+                    ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
+                    : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300')
+                }
+              >
+                {v}
+              </button>
+            );
+          })}
+        </div>
+        {!splatAvailable && (
+          <div className="mt-1 text-[10px] text-neutral-500">
+            run scripts/train-splats.sh + scripts/snap-splats.ts to unlock real visuals
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-type WallSegment = { p0: THREE.Vector2; p1: THREE.Vector2 };
-
-function buildWallSegments(
-  walls: Surface[],
-  holesByWall: Map<string, Surface[]>
-): WallSegment[] {
-  const out: WallSegment[] = [];
-  for (const wall of walls) {
-    const m = new THREE.Matrix4().fromArray(wall.transform);
-    const center = new THREE.Vector3().setFromMatrixPosition(m);
-    const xAxis = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize();
-    const half = wall.dimensions[0] / 2;
-
-    // Project each opening into wall-local X to get its [start, end] interval.
-    const holes = holesByWall.get(wall.identifier) ?? [];
-    const intervals: Array<[number, number]> = [];
-    for (const hole of holes) {
-      const [lx] = worldPointInSurfaceLocal(wall.transform, [
-        hole.transform[12],
-        hole.transform[13],
-        hole.transform[14],
-      ]);
-      const hw = hole.dimensions[0] / 2;
-      intervals.push([lx - hw, lx + hw]);
-    }
-    intervals.sort((a, b) => a[0] - b[0]);
-
-    // Subtract intervals from [-half, +half]; keep solid pieces.
-    let cursor = -half;
-    for (const [hStart, hEnd] of intervals) {
-      const s = Math.max(hStart, -half);
-      const e = Math.min(hEnd, half);
-      if (s > cursor + 1e-3) {
-        out.push(makeSegment(center, xAxis, cursor, s));
-      }
-      cursor = Math.max(cursor, e);
-    }
-    if (half > cursor + 1e-3) {
-      out.push(makeSegment(center, xAxis, cursor, half));
-    }
-  }
-  return out;
-}
-
-function makeSegment(
-  center: THREE.Vector3,
-  xAxis: THREE.Vector3,
-  x0: number,
-  x1: number
-): WallSegment {
-  const a = center.clone().addScaledVector(xAxis, x0);
-  const b = center.clone().addScaledVector(xAxis, x1);
-  return { p0: new THREE.Vector2(a.x, a.z), p1: new THREE.Vector2(b.x, b.z) };
-}
-
-/** Every detected object becomes 4 wall-equivalent segments along its
- *  bounding-box footprint. Until the keep/remove/ignore UI exists (PRD §5.5),
- *  we treat low- and high-confidence detections the same so the user bumps
- *  into everything that's visibly there. */
-function buildObjectSegments(objects: DetectedObject[]): WallSegment[] {
-  const out: WallSegment[] = [];
-  for (const obj of objects) {
-    const m = new THREE.Matrix4().fromArray(obj.transform);
-    const [w, , d] = obj.dimensions;
-    const localCorners = [
-      new THREE.Vector3(-w / 2, 0, -d / 2),
-      new THREE.Vector3(w / 2, 0, -d / 2),
-      new THREE.Vector3(w / 2, 0, d / 2),
-      new THREE.Vector3(-w / 2, 0, d / 2),
-    ];
-    const worldCorners = localCorners.map((c) => c.applyMatrix4(m));
-    for (let i = 0; i < 4; i++) {
-      const a = worldCorners[i];
-      const b = worldCorners[(i + 1) % 4];
-      out.push({
-        p0: new THREE.Vector2(a.x, a.z),
-        p1: new THREE.Vector2(b.x, b.z),
-      });
-    }
-  }
-  return out;
-}
-
-function closestPointOnSegment(
-  p: THREE.Vector2,
-  a: THREE.Vector2,
-  b: THREE.Vector2
-): THREE.Vector2 {
-  const ab = b.clone().sub(a);
-  const lenSq = ab.lengthSq();
-  if (lenSq < 1e-8) return a.clone();
-  const ap = p.clone().sub(a);
-  const t = Math.max(0, Math.min(1, ap.dot(ab) / lenSq));
-  return a.clone().addScaledVector(ab, t);
-}
+// Wall/object segment + point-on-segment helpers live in lib/room/segments.ts
+// (shared with the spatial system).
 
 function FirstPersonRig({
   walls,
@@ -419,10 +397,12 @@ function WallWithHoles({
   wall,
   holes,
   mode,
+  viewMode,
 }: {
   wall: Surface;
   holes: Surface[];
   mode: Mode;
+  viewMode: ViewMode;
 }) {
   const t = useMemo(() => decomposeTransform(wall.transform), [wall.transform]);
   const quat = new THREE.Quaternion(
@@ -466,13 +446,18 @@ function WallWithHoles({
     return new THREE.ShapeGeometry(shape);
   }, [wall.transform, wall.dimensions, wall.polygonCorners, holes]);
 
+  if (viewMode === 'splat') return null; // splats are the visible surface
+
+  const opacity = viewMode === 'hybrid' ? 0.18 : mode === 'walk' ? 1 : 0.55;
+  const transparent = viewMode === 'hybrid' || mode !== 'walk';
+
   return (
     <mesh position={t.position} quaternion={quat}>
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
         color="#f1e8d8"
-        transparent={mode !== 'walk'}
-        opacity={mode === 'walk' ? 1 : 0.55}
+        transparent={transparent}
+        opacity={opacity}
         side={THREE.DoubleSide}
         polygonOffset
         polygonOffsetFactor={1}
@@ -486,10 +471,12 @@ function SurfaceMesh({
   surface,
   color,
   opacity,
+  viewMode,
 }: {
   surface: Surface;
   color: string;
   opacity: number;
+  viewMode: ViewMode;
 }) {
   const t = useMemo(() => decomposeTransform(surface.transform), [surface.transform]);
   const [w, h] = surface.dimensions;
@@ -499,15 +486,22 @@ function SurfaceMesh({
     t.quaternion[2],
     t.quaternion[3]
   );
+  if (viewMode === 'splat') return null;
+  const finalOpacity = viewMode === 'hybrid' ? Math.min(opacity, 0.2) : opacity;
   return (
     <mesh position={t.position} quaternion={quat}>
       <planeGeometry args={[w, h]} />
-      <meshStandardMaterial color={color} transparent opacity={opacity} side={THREE.DoubleSide} />
+      <meshStandardMaterial
+        color={color}
+        transparent
+        opacity={finalOpacity}
+        side={THREE.DoubleSide}
+      />
     </mesh>
   );
 }
 
-function FloorMesh({ floor }: { floor: Surface }) {
+function FloorMesh({ floor, viewMode }: { floor: Surface; viewMode: ViewMode }) {
   const t = useMemo(() => decomposeTransform(floor.transform), [floor.transform]);
   const quat = new THREE.Quaternion(
     t.quaternion[0],
@@ -531,15 +525,33 @@ function FloorMesh({ floor }: { floor: Surface }) {
     return geo;
   }, [floor.polygonCorners, floor.dimensions]);
 
+  if (viewMode === 'splat') return null;
+  const transparent = viewMode === 'hybrid';
+  const opacity = viewMode === 'hybrid' ? 0.25 : 1;
+
   return (
     <mesh position={t.position} quaternion={quat} receiveShadow>
       <primitive object={geometry} attach="geometry" />
-      <meshStandardMaterial color="#a08869" side={THREE.DoubleSide} roughness={0.85} />
+      <meshStandardMaterial
+        color="#a08869"
+        side={THREE.DoubleSide}
+        roughness={0.85}
+        transparent={transparent}
+        opacity={opacity}
+      />
     </mesh>
   );
 }
 
-function ObjectBox({ object, mode }: { object: DetectedObject; mode: Mode }) {
+function ObjectBox({
+  object,
+  mode,
+  viewMode,
+}: {
+  object: DetectedObject;
+  mode: Mode;
+  viewMode: ViewMode;
+}) {
   const t = useMemo(() => decomposeTransform(object.transform), [object.transform]);
   const cat = categoryOf(object.category);
   const conf = confidenceOf(object.confidence);
@@ -556,17 +568,42 @@ function ObjectBox({ object, mode }: { object: DetectedObject; mode: Mode }) {
   // opaque and you'll bump into it. In orbit mode we keep low-conf
   // detections ghosted so the designer view doesn't get cluttered.
   const ghosted = mode !== 'walk' && conf === 'low';
+  const splatMode = viewMode === 'splat';
+  const hybridMode = viewMode === 'hybrid';
+
+  if (splatMode) {
+    // Splats are the visible furniture; show only the label so the user can
+    // still identify what the AI sees.
+    return (
+      <group position={t.position} quaternion={quat}>
+        <Html
+          center
+          distanceFactor={8}
+          position={[0, h / 2 + 0.15, 0]}
+          style={{ pointerEvents: 'none' }}
+        >
+          <div className="whitespace-nowrap rounded bg-white/55 px-2 py-0.5 text-[10px] font-medium text-neutral-600 italic">
+            {cat}
+          </div>
+        </Html>
+      </group>
+    );
+  }
+
+  const opacity = hybridMode ? 0.18 : ghosted ? 0.22 : 1;
+  const transparent = hybridMode || ghosted;
+  const depthWrite = !transparent;
 
   return (
     <group position={t.position} quaternion={quat}>
-      <mesh castShadow receiveShadow>
+      <mesh castShadow={!transparent} receiveShadow={!transparent}>
         <boxGeometry args={[w, h, d]} />
         <meshStandardMaterial
           color={color}
-          transparent={ghosted}
-          opacity={ghosted ? 0.22 : 1}
+          transparent={transparent}
+          opacity={opacity}
           roughness={0.7}
-          depthWrite={!ghosted}
+          depthWrite={depthWrite}
         />
       </mesh>
       <Html

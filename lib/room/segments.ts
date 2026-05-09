@@ -11,7 +11,6 @@ import * as THREE from 'three';
 import {
   type Surface,
   type DetectedObject,
-  confidenceOf,
   worldPointInSurfaceLocal,
 } from '@/lib/roomplan';
 
@@ -53,10 +52,13 @@ export function buildWallSegments(
   return out;
 }
 
-export function buildObjectSegments(objects: DetectedObject[]): WallSegment[] {
+export function buildObjectSegments(
+  objects: DetectedObject[],
+  filter?: (obj: DetectedObject) => boolean
+): WallSegment[] {
   const out: WallSegment[] = [];
   for (const obj of objects) {
-    if (confidenceOf(obj.confidence) === 'low') continue;
+    if (filter && !filter(obj)) continue;
     const m = new THREE.Matrix4().fromArray(obj.transform);
     const [w, , d] = obj.dimensions;
     const localCorners = [
