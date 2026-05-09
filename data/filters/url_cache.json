@@ -1,33 +1,367 @@
 {
-  "https://www.amazon.co.uk/dp/B07B3XXD3P": true,
-  "https://www.amazon.co.uk/dp/B07G2H3L4L": false,
-  "https://www.amazon.co.uk/dp/B07GFFY4TQ": true,
-  "https://www.amazon.com.mx/dp/B07FM83Z21": true,
-  "https://www.amazon.com/dp/B071777YN3": true,
-  "https://www.amazon.com/dp/B071P9WJBT": true,
-  "https://www.amazon.com/dp/B071PDYKYB": true,
-  "https://www.amazon.com/dp/B072ZLCB3M": true,
-  "https://www.amazon.com/dp/B075X4QMW7": true,
-  "https://www.amazon.com/dp/B075YP4WVQ": true,
-  "https://www.amazon.com/dp/B07B4MG9H2": true,
-  "https://www.amazon.com/dp/B07B4W5RF7": true,
-  "https://www.amazon.com/dp/B07B4WR39P": true,
-  "https://www.amazon.com/dp/B07B4YVDLQ": true,
-  "https://www.amazon.com/dp/B07B4ZFC5H": true,
-  "https://www.amazon.com/dp/B07DBFT2YG": true,
-  "https://www.amazon.com/dp/B07DBHCKHY": true,
-  "https://www.amazon.com/dp/B07F2X8K62": true,
-  "https://www.amazon.com/dp/B07HSLQY2F": true,
-  "https://www.amazon.com/dp/B07J2R9Y7F": true,
-  "https://www.amazon.com/dp/B07QBQCG1R": true,
-  "https://www.amazon.com/dp/B07QC85X9C": true,
-  "https://www.amazon.com/dp/B082JH6LSF": true,
-  "https://www.amazon.com/dp/B0853JGLT7": true,
-  "https://www.amazon.de/dp/B075NR8HWJ": true,
-  "https://www.amazon.de/dp/B07TZ9BMJG": true,
-  "https://www.amazon.fr/dp/B07NR2M291": false,
-  "https://www.amazon.it/dp/B07JGPK68C": true,
-  "https://www.amazon.it/dp/B07TJVTZRF": true,
-  "https://www.amazon.it/dp/B07TTY3FYP": true,
-  "https://www.amazon.it/dp/B07VSV4783": true
+  "https://www.amazon.co.uk/dp/B07B3XXD3P": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.co.uk/dp/B07G2H3L4L": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.co.uk/dp/B07GFFY4TQ": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com.mx/dp/B07FM83Z21": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B00EUL2B16": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 186.8
+  },
+  "https://www.amazon.com/dp/B01N3MBCKT": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 53.41
+  },
+  "https://www.amazon.com/dp/B0719STKS9": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0719STLL8": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071J4VYJL": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071P9WJBT": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071PDYKYB": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071SHLFLM": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071ZJ6BGG": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071ZJ6CD5": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B071ZJ6CK3": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0725Z9MX3": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0725Z9MXM": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B072C5WNZF": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B072PXBV6W": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0732QTV8S": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0735SK5LP": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0735XMSZ8": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B073F7GFKB": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B073P5PZ5P": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 12.99
+  },
+  "https://www.amazon.com/dp/B075YP4WVQ": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 219.99
+  },
+  "https://www.amazon.com/dp/B075Z8769G": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 134.95
+  },
+  "https://www.amazon.com/dp/B075ZBJL11": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B075ZBLWBH": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B0764W75LL": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 154.61
+  },
+  "https://www.amazon.com/dp/B07B4MG9H2": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07B4W5RF7": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07B4WKMB1": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07B4WR39P": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07B4ZM2J8": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07B4ZXKFQ": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 58.78
+  },
+  "https://www.amazon.com/dp/B07B515Q6F": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07DB92HMS": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 19.54
+  },
+  "https://www.amazon.com/dp/B07DBHCKHY": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07DBHCKKS": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07HSDXLTW": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07HSKY87X": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 43.68
+  },
+  "https://www.amazon.com/dp/B07HSLQY2F": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 86.99
+  },
+  "https://www.amazon.com/dp/B07J2R9Y7F": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07MBFDJQ3": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 76.46
+  },
+  "https://www.amazon.com/dp/B07P5LN16X": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 12.99
+  },
+  "https://www.amazon.com/dp/B07P6JV16D": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07PBZ9CLJ": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 265.99
+  },
+  "https://www.amazon.com/dp/B07QBQCG1R": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07QC85X9C": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 33.82
+  },
+  "https://www.amazon.com/dp/B07QFB1L2P": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 39.13
+  },
+  "https://www.amazon.com/dp/B07QFB4XBP": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07QGG3PVY": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07QHKYCVB": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07QJXW4VD": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 179.99
+  },
+  "https://www.amazon.com/dp/B07QX2BYDH": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 109.98
+  },
+  "https://www.amazon.com/dp/B07TQ89MMN": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 35.09
+  },
+  "https://www.amazon.com/dp/B07TYTR16H": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 219.99
+  },
+  "https://www.amazon.com/dp/B07TZMWH8M": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.com/dp/B07WQ4P35G": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 29.98
+  },
+  "https://www.amazon.com/dp/B0825CP3NS": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 69.99
+  },
+  "https://www.amazon.com/dp/B082VKTV1P": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 290.49
+  },
+  "https://www.amazon.com/dp/B082VLYQWX": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 1448.8
+  },
+  "https://www.amazon.com/dp/B082VMDZKZ": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 25.9
+  },
+  "https://www.amazon.com/dp/B084MXWPF3": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 69.99
+  },
+  "https://www.amazon.com/dp/B084W2WJH2": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 74.9
+  },
+  "https://www.amazon.com/dp/B0853L3TCM": {
+    "checked_at": "2026-05-09",
+    "live": true,
+    "price_usd": 107.77
+  },
+  "https://www.amazon.de/dp/B075NR8HWJ": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.de/dp/B07TZ9BMJG": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.fr/dp/B07NR2M291": {
+    "checked_at": null,
+    "live": false,
+    "price_usd": null
+  },
+  "https://www.amazon.it/dp/B07JGPK68C": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.it/dp/B07TJVTZRF": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.it/dp/B07TTY3FYP": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  },
+  "https://www.amazon.it/dp/B07VSV4783": {
+    "checked_at": null,
+    "live": true,
+    "price_usd": null
+  }
 }
