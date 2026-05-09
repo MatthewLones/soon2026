@@ -24,6 +24,7 @@
 import type { Room } from './normalize';
 import { type Placement } from './grid';
 import { validatePlacement, type PlaceResult } from './place';
+import { nextPlacementId } from './placement-id';
 import { type SemanticTree, type WallNode, type ObjectNode } from './semantic_tree';
 import {
   type Side,
@@ -92,12 +93,6 @@ function findObjectNode(tree: SemanticTree, target_id: string): ObjectNode | nul
 
 function categoryFacesTarget(category: CatalogItem['category']): boolean {
   return category === 'seating';
-}
-
-let placementCounter = 0;
-function nextPlacementId(): string {
-  placementCounter += 1;
-  return `p_${placementCounter.toString(36)}`;
 }
 
 // ---------- Step 1: dependency order ----------
