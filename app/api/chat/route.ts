@@ -13,7 +13,11 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as {
+  console.log('[chat/route] POST received');
+  const body = (await req.json().catch((e) => {
+    console.error('[chat/route] Failed to parse request body:', e);
+    return {};
+  })) as {
     message?: string;
     rolePromptOverride?: string;
     model?: 'sonnet' | 'opus';
@@ -21,7 +25,9 @@ export async function POST(req: Request) {
     maxToolIterations?: number;
   };
   const message = body.message;
+  console.log('[chat/route] message:', message?.slice(0, 120), '...');
   if (!message || typeof message !== 'string') {
+    console.error('[chat/route] Rejected — missing or non-string message');
     return new Response('Missing or non-string `message`', { status: 400 });
   }
 
@@ -29,20 +35,24 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (event: SseEvent) => {
+        console.log(`[chat/route] SSE → ${event.type}`, 'name' in event ? (event as { name: string }).name : '');
         const frame = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
         controller.enqueue(encoder.encode(frame));
       };
 
       try {
-        await runAgentTurn(message, send, {
+        console.log('[chat/route] Starting agent turn…');
+        const result = await runAgentTurn(message, send, {
           rolePromptOverride: body.rolePromptOverride,
           model: body.model,
           thinkingBudget: body.thinkingBudget,
           maxToolIterations: body.maxToolIterations,
         });
+        console.log('[chat/route] Agent turn completed:', result);
       } catch (err) {
-        const text = err instanceof Error ? err.message : String(err);
-        const frame = `event: error\ndata: ${JSON.stringify({ message: text })}\n\n`;
+        const text = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+        console.error('[chat/route] Agent turn THREW:', text);
+        const frame = `event: error\ndata: ${JSON.stringify({ type: 'error', message: text })}\n\n`;
         controller.enqueue(encoder.encode(frame));
       } finally {
         controller.close();

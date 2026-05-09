@@ -236,6 +236,7 @@ def streamline(item, category=None):
     return {
         "item_id": item.get("item_id"),
         "3dmodel_id": item.get("3dmodel_id"),
+        "main_image_id": item.get("main_image_id"),
         "category": category,
         "product_type": (item.get("product_type", [{}])[0].get("value")
                          if item.get("product_type") else None),
