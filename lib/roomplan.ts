@@ -85,6 +85,76 @@ export function confidenceOf(c: ConfidenceEnum): 'high' | 'medium' | 'low' {
   return categoryOf(c);
 }
 
+/** Compute the dominant-wall yaw and rotation pivot for axis-alignment.
+ *  The yaw is the longest wall's heading on the floor plane, normalized to
+ *  (-π/4, π/4] so rotating by that angle aligns with the closest cardinal
+ *  axis. Pivot = floor[0]'s transform position (the floor centroid). */
+export function computeRoomAlignment(raw: RoomPlanRaw): {
+  yaw: number;
+  pivot: [number, number, number];
+} {
+  if (!raw.walls.length || !raw.floors[0]) {
+    return { yaw: 0, pivot: [0, 0, 0] };
+  }
+  const longest = raw.walls.reduce((a, b) =>
+    a.dimensions[0] >= b.dimensions[0] ? a : b
+  );
+  // Wall's local X axis = column 0 of the transform; yaw on floor plane =
+  // atan2(column0.z, column0.x) per PRD §5.2.
+  const rawYaw = Math.atan2(longest.transform[2], longest.transform[0]);
+  const HALF_PI = Math.PI / 2;
+  const QUARTER_PI = Math.PI / 4;
+  let y = ((rawYaw % HALF_PI) + HALF_PI) % HALF_PI;
+  if (y > QUARTER_PI) y -= HALF_PI;
+  const t = raw.floors[0].transform;
+  return { yaw: y, pivot: [t[12], t[13], t[14]] };
+}
+
+/** Apply axis-alignment to a raw scan: rotate every wall/floor/door/window/
+ *  opening/object transform around the floor centroid so the dominant wall
+ *  ends up parallel to a world cardinal axis. After this, every downstream
+ *  reader (canvas renderer, normalizeRoom, semantic tree, validator, agent
+ *  tools) sees the same axis-aligned room — no per-view translation layer.
+ *
+ *  polygonCorners stay untouched (they're in surface-local frame) and
+ *  sections.center is rotated since it's world-space. */
+export function alignRoom(raw: RoomPlanRaw): RoomPlanRaw {
+  const { yaw, pivot } = computeRoomAlignment(raw);
+  if (yaw === 0) return raw;
+
+  // A = T(pivot) · R_y(yaw) · T(-pivot). Three.js Matrix4.makeRotationY
+  // matches the convention used in scan-canvas's previous group rotation,
+  // so this is what aligns the longest wall with world +X (or -X).
+  const A = new THREE.Matrix4()
+    .makeTranslation(pivot[0], pivot[1], pivot[2])
+    .multiply(new THREE.Matrix4().makeRotationY(yaw))
+    .multiply(new THREE.Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
+
+  const transformMatrix = (t: number[]): number[] => {
+    const M = new THREE.Matrix4().fromArray(t);
+    return new THREE.Matrix4().multiplyMatrices(A, M).toArray();
+  };
+
+  const transformPoint = (p: [number, number, number]): [number, number, number] => {
+    const v = new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(A);
+    return [v.x, v.y, v.z];
+  };
+
+  const mapSurfaces = <S extends Surface>(arr: S[]): S[] =>
+    arr.map((s) => ({ ...s, transform: transformMatrix(s.transform) }));
+
+  return {
+    ...raw,
+    walls: mapSurfaces(raw.walls),
+    floors: mapSurfaces(raw.floors),
+    doors: mapSurfaces(raw.doors),
+    windows: mapSurfaces(raw.windows),
+    openings: mapSurfaces(raw.openings),
+    objects: raw.objects.map((o) => ({ ...o, transform: transformMatrix(o.transform) })),
+    sections: raw.sections.map((s) => ({ ...s, center: transformPoint(s.center) })),
+  };
+}
+
 /** Decompose a 16-float column-major transform into r3f-friendly props. */
 export function decomposeTransform(transform: number[]) {
   const m = new THREE.Matrix4().fromArray(transform);

@@ -84,9 +84,21 @@ function rot(v: Vec2, rad: number): Vec2 {
   return { x: c * v.x - s * v.z, z: s * v.x + c * v.z };
 }
 
+export type SnapOptions = {
+  /** When true, skip cardinal/wall yaw snapping. Used by the assignment engine
+   *  when it has already computed a deliberate yaw (e.g. perpendicular to a
+   *  specific wall) — letting snap re-snap would clobber it. */
+  disable_yaw_snap?: boolean;
+  /** When true, skip the wall-pushback step. Used by the assignment engine
+   *  when it has already positioned the item against a specific wall and
+   *  doesn't want a stronger nearby wall to pull it elsewhere. */
+  disable_wall_snap?: boolean;
+};
+
 export function snap(
   room: Room,
-  input: { x: number; z: number; rotation_y: number; footprint: { w: number; d: number } }
+  input: { x: number; z: number; rotation_y: number; footprint: { w: number; d: number } },
+  options: SnapOptions = {}
 ): SnapResult {
   const adjustments: Adjustment[] = [];
   let x = input.x;
@@ -96,28 +108,30 @@ export function snap(
   const walls = wallLines(room);
 
   // ---------- 1. Yaw snap ----------
-  const candidates: number[] = [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI];
-  // Add wall-aligned yaws (perpendicular to each wall — i.e. furniture sits
-  // back-against-wall, facing into room).
-  // Convention: backDir(yaw) = rot((0,-1), yaw) = (sin yaw, -cos yaw).
-  // We want backDir = outward, so yaw = atan2(out.x, -out.z).
-  for (const wl of walls) {
-    const desiredYaw = Math.atan2(wl.outward.x, -wl.outward.z);
-    candidates.push(normalizeAngle(desiredYaw));
-  }
-  let bestYaw = yaw;
-  let bestDelta = Infinity;
-  for (const c of candidates) {
-    const cn = normalizeAngle(c);
-    const d = angleDiff(yaw, cn);
-    if (d < bestDelta) {
-      bestDelta = d;
-      bestYaw = cn;
+  if (!options.disable_yaw_snap) {
+    const candidates: number[] = [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI];
+    // Add wall-aligned yaws (perpendicular to each wall — i.e. furniture sits
+    // back-against-wall, facing into room).
+    // Convention: backDir(yaw) = rot((0,-1), yaw) = (sin yaw, -cos yaw).
+    // We want backDir = outward, so yaw = atan2(out.x, -out.z).
+    for (const wl of walls) {
+      const desiredYaw = Math.atan2(wl.outward.x, -wl.outward.z);
+      candidates.push(normalizeAngle(desiredYaw));
     }
-  }
-  if (bestDelta > 1e-4 && bestDelta <= YAW_SNAP_TOLERANCE) {
-    adjustments.push({ kind: 'yaw', from: yaw, to: bestYaw });
-    yaw = bestYaw;
+    let bestYaw = yaw;
+    let bestDelta = Infinity;
+    for (const c of candidates) {
+      const cn = normalizeAngle(c);
+      const d = angleDiff(yaw, cn);
+      if (d < bestDelta) {
+        bestDelta = d;
+        bestYaw = cn;
+      }
+    }
+    if (bestDelta > 1e-4 && bestDelta <= YAW_SNAP_TOLERANCE) {
+      adjustments.push({ kind: 'yaw', from: yaw, to: bestYaw });
+      yaw = bestYaw;
+    }
   }
 
   // ---------- 2. Wall snap ----------
@@ -136,7 +150,7 @@ export function snap(
     }
   }
 
-  if (nearest && nearest.distance <= WALL_SNAP_DISTANCE) {
+  if (!options.disable_wall_snap && nearest && nearest.distance <= WALL_SNAP_DISTANCE) {
     // Only push to wall when the OBB's back axis is roughly aligned with the
     // wall's outward normal — otherwise the agent placed the item at an
     // intentional angle and we should leave it alone.

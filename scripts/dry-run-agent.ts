@@ -1,15 +1,15 @@
 /**
  * Run: npx tsx scripts/dry-run-agent.ts "Cozy modern reading nook, $1500, warm woods"
  *
- * Exercises the full agent loop against the real scan + stub catalog.
+ * Exercises the full agent loop against the real scan + curated catalog.
  * Prints a tool_call/tool_result/assistant_message timeline — the same
  * shape the SSE route emits to the browser.
  *
- * Pass criteria:
+ * Pass criteria (semantic-tree edition):
  *   - At least one SEARCH_FURNITURE
- *   - At least one QUERY_SPACE
- *   - At least one PLACE_ITEM (success or structured fail)
+ *   - At least one ASSIGN_TO_WALL or ASSIGN_NEXT_TO (success or structured fail)
  *   - Assistant produces a final text message
+ *   - NO coordinate-shaped tools (PLACE_ITEM / MOVE_ITEM / QUERY_SPACE) are called
  */
 
 import { runAgentTurn, type SseEvent } from '../lib/agent/loop';
@@ -26,7 +26,13 @@ async function main() {
   const s = getSession();
   console.log(`Loaded room "${s.room.id}" (${s.room.walls.length} walls), catalog ${s.catalog.length} items.\n`);
 
-  const counts = { tool_call: 0, tool_result: 0, assistant_message: 0, loop_aborted: 0 };
+  const counts = {
+    tool_call: 0,
+    tool_result: 0,
+    thinking: 0,
+    assistant_message: 0,
+    loop_aborted: 0,
+  };
   const seenTools = new Set<string>();
 
   const emit = (event: SseEvent) => {
@@ -40,6 +46,9 @@ async function main() {
       const preview = JSON.stringify(event.result);
       const truncated = preview.length > 240 ? preview.slice(0, 240) + '…' : preview;
       console.log(`${tag} ← result (${event.id.slice(-6)}) ${truncated}`);
+    } else if (event.type === 'thinking') {
+      const preview = event.text.slice(0, 240);
+      console.log(`${tag} ✎ thinking: ${preview}${event.text.length > 240 ? '…' : ''}`);
     } else if (event.type === 'assistant_message') {
       console.log(`${tag} ✦ assistant:\n${event.text}`);
     } else if (event.type === 'loop_aborted') {
@@ -62,12 +71,29 @@ async function main() {
     console.log(`  • ${pl.id}: ${pl.catalog_item_id} @ (${pl.position.x}, ${pl.position.z}) yaw=${pl.rotation_y.toFixed(2)}`);
   }
 
-  // Pass criteria
+  // Pass criteria — semantic-tree surface only, no coordinate-shaped tools.
+  const placedSemantically = seenTools.has('ASSIGN_TO_WALL') || seenTools.has('ASSIGN_NEXT_TO');
+  const usedForbiddenCoordTool =
+    seenTools.has('PLACE_ITEM') ||
+    seenTools.has('MOVE_ITEM') ||
+    seenTools.has('ROTATE_ITEM') ||
+    seenTools.has('QUERY_SPACE') ||
+    seenTools.has('GET_ROOM');
   const pass =
     seenTools.has('SEARCH_FURNITURE') &&
-    seenTools.has('PLACE_ITEM') &&
-    counts.assistant_message >= 1;
-  console.log(pass ? '\nPASS ✓' : '\nFAIL ✗ — missing one of: SEARCH_FURNITURE, PLACE_ITEM, assistant message');
+    placedSemantically &&
+    counts.assistant_message >= 1 &&
+    !usedForbiddenCoordTool;
+  if (pass) {
+    console.log('\nPASS ✓');
+  } else {
+    const missing: string[] = [];
+    if (!seenTools.has('SEARCH_FURNITURE')) missing.push('SEARCH_FURNITURE');
+    if (!placedSemantically) missing.push('ASSIGN_TO_WALL or ASSIGN_NEXT_TO');
+    if (counts.assistant_message < 1) missing.push('assistant_message');
+    if (usedForbiddenCoordTool) missing.push('(forbidden coord tool was called)');
+    console.log(`\nFAIL ✗ — ${missing.join(', ')}`);
+  }
   process.exit(pass ? 0 : 1);
 }
 

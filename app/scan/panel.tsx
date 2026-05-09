@@ -9,16 +9,23 @@ type Tab = 'chat' | 'catalog' | 'prompt' | 'debug';
 type ChatEvent =
   | { type: 'tool_call'; id: string; name: string; input: unknown; t: number }
   | { type: 'tool_result'; id: string; result: unknown; t: number }
+  | { type: 'thinking'; text: string; t: number }
   | { type: 'assistant_message'; text: string; t: number }
   | { type: 'loop_aborted'; reason: string; t: number }
   | { type: 'error'; message: string; t?: number };
 
+type ModelChoice = 'sonnet' | 'opus';
+
 export default function AgentPanel({
   ctx,
   onRefresh,
+  onCatalogDragStart,
+  onCatalogDragEnd,
 }: {
   ctx: AgentContext | null;
   onRefresh: () => void;
+  onCatalogDragStart?: (id: string) => void;
+  onCatalogDragEnd?: () => void;
 }) {
   const [tab, setTab] = useState<Tab>('chat');
   const [rolePromptDraft, setRolePromptDraft] = useState('');
@@ -30,6 +37,22 @@ export default function AgentPanel({
 
   return (
     <aside className="flex w-[440px] shrink-0 flex-col border-l border-neutral-300 bg-white text-neutral-900">
+      <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50/80 px-2 py-1">
+        <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+          {ctx?.placements.length ?? 0} placement{ctx?.placements.length === 1 ? '' : 's'}
+        </div>
+        <button
+          onClick={async () => {
+            if (!ctx?.placements.length) return;
+            await fetch('/api/placements', { method: 'DELETE' });
+            onRefresh();
+          }}
+          disabled={!ctx?.placements.length}
+          className="rounded bg-red-600 px-2 py-0.5 text-[10px] font-medium text-white transition hover:bg-red-700 disabled:bg-neutral-200 disabled:text-neutral-400"
+        >
+          reset placements
+        </button>
+      </div>
       <div className="flex border-b border-neutral-200 bg-neutral-50/80">
         {(['chat', 'catalog', 'prompt', 'debug'] as Tab[]).map((t) => (
           <button
@@ -54,7 +77,13 @@ export default function AgentPanel({
             onTurnComplete={onRefresh}
           />
         )}
-        {tab === 'catalog' && <CatalogTab catalog={ctx?.catalog ?? []} />}
+        {tab === 'catalog' && (
+          <CatalogTab
+            catalog={ctx?.catalog ?? []}
+            onDragStart={onCatalogDragStart}
+            onDragEnd={onCatalogDragEnd}
+          />
+        )}
         {tab === 'prompt' && (
           <PromptTab ctx={ctx} draft={rolePromptDraft} setDraft={setRolePromptDraft} />
         )}
@@ -78,6 +107,9 @@ function ChatTab({
   );
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [model, setModel] = useState<ModelChoice>('sonnet');
+  const [thinkingOn, setThinkingOn] = useState(false);
+  const [thinkingBudget, setThinkingBudget] = useState(5000);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,7 +125,12 @@ function ChatTab({
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: input, rolePromptOverride }),
+        body: JSON.stringify({
+          message: input,
+          rolePromptOverride,
+          model,
+          thinkingBudget: thinkingOn ? thinkingBudget : 0,
+        }),
       });
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
@@ -155,10 +192,43 @@ function ChatTab({
           placeholder="What would you like the agent to do?"
           disabled={streaming}
         />
-        <div className="mt-2 flex items-center justify-between">
-          <span className="text-[10px] text-neutral-500">
-            {rolePromptOverride ? 'role-prompt overridden' : 'using default role prompt'}
-          </span>
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-[10px]">
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value as ModelChoice)}
+              disabled={streaming}
+              className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 font-medium text-neutral-800 disabled:opacity-40"
+            >
+              <option value="sonnet">Sonnet 4.6</option>
+              <option value="opus">Opus 4.7</option>
+            </select>
+            <label className="flex items-center gap-1 text-neutral-600">
+              <input
+                type="checkbox"
+                checked={thinkingOn}
+                onChange={(e) => setThinkingOn(e.target.checked)}
+                disabled={streaming}
+                className="h-3 w-3"
+              />
+              think
+            </label>
+            {thinkingOn && (
+              <input
+                type="number"
+                value={thinkingBudget}
+                onChange={(e) => setThinkingBudget(Math.max(1024, Number(e.target.value) || 5000))}
+                step={1000}
+                min={1024}
+                max={32000}
+                disabled={streaming}
+                className="w-16 rounded border border-neutral-300 bg-white px-1 py-0.5 font-mono text-neutral-800 disabled:opacity-40"
+              />
+            )}
+            {rolePromptOverride && (
+              <span className="text-amber-700">role-prompt overridden</span>
+            )}
+          </div>
           <button
             onClick={send}
             disabled={streaming || !input.trim()}
@@ -200,6 +270,21 @@ function EventCard({ event }: { event: ChatEvent }) {
       </div>
     );
   }
+  if (event.type === 'thinking') {
+    return (
+      <div className="rounded border border-purple-200 bg-purple-50/40 p-2">
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-purple-700">
+            thinking
+          </span>
+          <span className="text-[10px] text-purple-600">+{event.t}ms</span>
+        </div>
+        <div className="whitespace-pre-wrap text-[11px] italic leading-relaxed text-purple-900/80">
+          {event.text}
+        </div>
+      </div>
+    );
+  }
   if (event.type === 'assistant_message') {
     return (
       <div className="rounded border border-neutral-300 bg-white p-2">
@@ -229,7 +314,15 @@ function EventCard({ event }: { event: ChatEvent }) {
 
 // ------------------------------ Catalog ------------------------------
 
-function CatalogTab({ catalog }: { catalog: CatalogItem[] }) {
+function CatalogTab({
+  catalog,
+  onDragStart,
+  onDragEnd,
+}: {
+  catalog: CatalogItem[];
+  onDragStart?: (id: string) => void;
+  onDragEnd?: () => void;
+}) {
   const [filter, setFilter] = useState('');
   const filtered = catalog.filter((item) => {
     if (!filter) return true;
@@ -247,12 +340,22 @@ function CatalogTab({ catalog }: { catalog: CatalogItem[] }) {
           className="w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs focus:border-neutral-500 focus:outline-none"
         />
         <div className="mt-1 text-[10px] text-neutral-500">
-          {filtered.length} / {catalog.length} items
+          {filtered.length} / {catalog.length} items · drag a card into the room
         </div>
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 text-xs">
         {filtered.map((item) => (
-          <div key={item.id} className="rounded border border-neutral-200 bg-white p-2">
+          <div
+            key={item.id}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-catalog-item', item.id);
+              e.dataTransfer.effectAllowed = 'copy';
+              onDragStart?.(item.id);
+            }}
+            onDragEnd={() => onDragEnd?.()}
+            className="cursor-grab select-none rounded border border-neutral-200 bg-white p-2 active:cursor-grabbing hover:border-neutral-400"
+          >
             <div className="flex items-start justify-between">
               <div>
                 <div className="font-medium text-neutral-900">{item.name}</div>

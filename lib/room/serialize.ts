@@ -19,7 +19,6 @@ import type {
 type CompactWall = {
   id: string;
   pos: [number, number, number];
-  yaw: number;
   heading: string;
   dim: [number, number];
   curve?: [number, number, number];
@@ -73,7 +72,6 @@ function compactWall(w: NormalizedWall): CompactWall {
   const out: CompactWall = {
     id: w.id,
     pos: t3(w.position),
-    yaw: w.rotation_y,
     heading: w.heading,
     dim: [w.dimensions.w, w.dimensions.h],
   };
@@ -135,8 +133,8 @@ export const COMPACT_ROOM_DOC = `
 Room schema (compact, all numbers in meters, floor-centered coords):
   dim: [width, depth, height]
   floor: array of [x, z] polygon corners (CCW)
-  walls[]: { id, pos:[x,y,z], yaw (radians), heading: N|NE|E|SE|S|SW|W|NW (outward),
-             dim:[w,h], curve?:[r,start,end], poly?:[[x,z]...], conf?:low|medium }
+  walls[]: { id, pos:[x,y,z], heading: N|NE|E|SE|S|SW|W|NW (outward normal),
+             dim:[length,height], curve?:[r,start,end], poly?:[[x,z]...], conf?:low|medium }
   doors[]/windows[]/openings[]: { id, type, parent: wall_id|null, pos:[x,y,z], yaw, dim:[w,h] }
   objects[]: { id, cat, pos:[x,z], yaw, dim:[w,d,h], attr?:[strings], decision?:remove|ignore }
   regions[]: { id, label, c:[x,z] }

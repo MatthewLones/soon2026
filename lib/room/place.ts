@@ -13,7 +13,7 @@
 import type { Room, Vec2 } from './normalize';
 import { type Grid, type Placement, buildGrid, obbHits, obbCorners, CELL_WALL, CELL_EXISTING } from './grid';
 import { regionOf, pointInPolygon } from './regions';
-import { snap, type Adjustment } from './snap';
+import { snap, type Adjustment, type SnapOptions } from './snap';
 
 export type PlaceInput = {
   catalog_item_id: string;
@@ -24,6 +24,9 @@ export type PlaceInput = {
   z: number;
   rotation_y: number;
   footprint: { w: number; d: number; h: number };
+  /** Snap behavior overrides. The assignment engine sets these when it has
+   *  already computed a deliberate orientation/position. */
+  snap_options?: SnapOptions;
 };
 
 export type PlaceSuccess = {
@@ -80,12 +83,16 @@ export function validatePlacement(
   input: PlaceInput
 ): PlaceResult {
   // 1. Snap
-  const snapped = snap(room, {
-    x: input.x,
-    z: input.z,
-    rotation_y: input.rotation_y,
-    footprint: { w: input.footprint.w, d: input.footprint.d },
-  });
+  const snapped = snap(
+    room,
+    {
+      x: input.x,
+      z: input.z,
+      rotation_y: input.rotation_y,
+      footprint: { w: input.footprint.w, d: input.footprint.d },
+    },
+    input.snap_options
+  );
 
   // 2. Point-in-floor check on the OBB corners
   const corners = obbCorners(

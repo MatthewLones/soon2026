@@ -1,12 +1,21 @@
 'use client';
 
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Grid, Html, PointerLockControls, useGLTF } from '@react-three/drei';
-import { Suspense, useMemo, useRef, useState, useEffect } from 'react';
+import {
+  Suspense,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  useEffect,
+  type MutableRefObject,
+} from 'react';
 import * as THREE from 'three';
 import type { Placement } from '@/lib/room/grid';
 import type { CatalogItem } from '@/lib/agent/catalog';
-import type { Vec3 } from '@/lib/room/normalize';
+import type { Vec2, Vec3 } from '@/lib/room/normalize';
+import type { PlaceFailure, PlaceResult } from '@/lib/room/place';
 import {
   type RoomPlanRaw,
   type Surface,
@@ -24,7 +33,9 @@ import {
   buildHolesByWall,
   closestPointOnSegment,
 } from '@/lib/room/segments';
+import type { SemanticTree } from '@/lib/room/semantic_tree';
 import SplatLayer from './splat-layer';
+import TreeDebugOverlay from './tree-debug-overlay';
 
 type Mode = 'orbit' | 'walk';
 type ViewMode = 'wireframe' | 'hybrid' | 'splat';
@@ -33,12 +44,34 @@ const PLAYER_RADIUS = 0.35; // ~70cm shoulder-to-shoulder
 const EYE_HEIGHT = 1.65; // average human standing eye height
 const WALK_SPEED = 3.5; // m/s
 
+/** State for an in-flight drag of an existing placement. The same struct
+ *  covers both translate and shift-rotate (the mode is sticky for the
+ *  drag). Optimistic worldX/worldZ/rotation_y drive the visible mesh until
+ *  pointer-up; on PATCH failure we just clear the state and re-render
+ *  against the unchanged server placements (which gives free revert). */
+type DragState = {
+  id: string;
+  worldX: number;
+  worldZ: number;
+  rotation_y: number;
+  mode: 'translate' | 'rotate';
+};
+
+type Status = { kind: 'error' | 'info'; text: string } | null;
+
 export default function ScanCanvas({
   room,
   splatUrl,
   placements = [],
   catalog = [],
   originOffset,
+  onFloorClick,
+  compartmentBounds,
+  onRefresh,
+  draggingCatalogItemId,
+  tree,
+  hoveredNodeId,
+  onNodeHover,
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
@@ -48,6 +81,21 @@ export default function ScanCanvas({
   /** World-space position of the floor centroid; used to convert
    *  floor-centered placement coords back to renderer world coords. */
   originOffset?: Vec3;
+  /** Called with world (x, z) when the user clicks on the floor in orbit mode. */
+  onFloorClick?: (point: Vec2) => void;
+  /** World-space bbox of the picked compartment; rendered as a green outline. */
+  compartmentBounds?: { min: Vec2; max: Vec2 } | null;
+  /** Triggers a re-fetch of /api/agent-context after a successful drop or PATCH. */
+  onRefresh?: () => void;
+  /** Catalog item id currently being dragged from the panel (HTML5 DnD).
+   *  Used to render the 3D ghost preview while hovering over the canvas. */
+  draggingCatalogItemId?: string | null;
+  /** Semantic tree for judge-mode overlay; null when debug mode is off. */
+  tree?: SemanticTree | null;
+  /** Currently hovered node id (cross-pane sync with TreeDebugPanel). */
+  hoveredNodeId?: string | null;
+  /** Bubble hover events from 3D overlay back up to the panel. */
+  onNodeHover?: (id: string | null) => void;
 }) {
   const cameraTarget = useMemo<[number, number, number]>(() => {
     if (room.floors[0]) {
@@ -85,6 +133,10 @@ export default function ScanCanvas({
     [wallSegments, objectSegments]
   );
   const floorY = useMemo(() => room.floors[0]?.transform[13] ?? -1.5, [room.floors]);
+  const ceilingHeight = useMemo(
+    () => Math.max(...room.walls.map((w) => w.dimensions[1]), 2.4),
+    [room.walls]
+  );
   const walkStart = useMemo(
     () => new THREE.Vector3(cameraTarget[0], 0, cameraTarget[2]),
     [cameraTarget]
@@ -92,6 +144,99 @@ export default function ScanCanvas({
 
   const [mode, setMode] = useState<Mode>('orbit');
   const [viewMode, setViewMode] = useState<ViewMode>(splatUrl ? 'hybrid' : 'wireframe');
+
+  // Drag-from-catalog and drag-existing-placement plumbing.
+  const cameraRef = useRef<THREE.Camera | null>(null);
+  const canvasWrapRef = useRef<HTMLDivElement | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const [ghost, setGhost] = useState<{ wx: number; wz: number } | null>(null);
+  const [status, setStatus] = useState<Status>(null);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flashStatus = useCallback((text: string, kind: 'error' | 'info' = 'error') => {
+    setStatus({ kind, text });
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = setTimeout(() => setStatus(null), 2500);
+  }, []);
+
+  const toFloor = useCallback(
+    (worldX: number, worldZ: number): Vec2 => ({
+      x: worldX - (originOffset?.x ?? 0),
+      z: worldZ - (originOffset?.z ?? 0),
+    }),
+    [originOffset]
+  );
+
+  // Cast a ray from a clientX/clientY screen point onto the floor plane.
+  // Returns null if the camera isn't ready yet (first paint) or the ray misses.
+  const raycastFloor = useCallback(
+    (clientX: number, clientY: number): { x: number; z: number } | null => {
+      const camera = cameraRef.current;
+      const wrap = canvasWrapRef.current;
+      if (!camera || !wrap) return null;
+      const rect = wrap.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -(((clientY - rect.top) / rect.height) * 2 - 1)
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY);
+      const hit = new THREE.Vector3();
+      if (!ray.ray.intersectPlane(plane, hit)) return null;
+      return { x: hit.x, z: hit.z };
+    },
+    [floorY]
+  );
+
+  const handleDragOver = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      // preventDefault is required by the HTML5 DnD spec to mark this element
+      // as a valid drop target. Without it, onDrop never fires.
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (mode !== 'orbit') return;
+      const hit = raycastFloor(e.clientX, e.clientY);
+      if (hit) setGhost({ wx: hit.x, wz: hit.z });
+    },
+    [mode, raycastFloor]
+  );
+
+  const handleDragLeave = useCallback(() => {
+    setGhost(null);
+  }, []);
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setGhost(null);
+      if (mode !== 'orbit') return;
+      const itemId = e.dataTransfer.getData('application/x-catalog-item');
+      if (!itemId) return;
+      // Guard: dropping before agent-context resolves would compute floor
+      // coords against (0, 0) and silently land in the wrong place.
+      if (!originOffset) {
+        flashStatus('Scene still loading — try again');
+        return;
+      }
+      const hit = raycastFloor(e.clientX, e.clientY);
+      if (!hit) return;
+      const { x, z } = toFloor(hit.x, hit.z);
+      try {
+        const res = (await fetch('/api/placements', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ catalog_item_id: itemId, x, z, rotation_y: 0 }),
+        }).then((r) => r.json())) as PlaceResult | { ok: false; reason: string };
+        if (res.ok) onRefresh?.();
+        else flashStatus(failureMsg(res));
+      } catch (err) {
+        console.error('drop POST failed', err);
+        flashStatus('Network error');
+      }
+    },
+    [mode, originOffset, raycastFloor, toFloor, onRefresh, flashStatus]
+  );
 
   // When entering walk mode, splats are the most immersive view; in orbit,
   // hybrid lets the user see both reality and the AI's structural model.
@@ -113,6 +258,9 @@ export default function ScanCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, viewMode, splatUrl]);
 
+  const ghostItem =
+    draggingCatalogItemId ? catalog.find((c) => c.id === draggingCatalogItemId) ?? null : null;
+
   return (
     <>
       <ModeHud
@@ -123,6 +271,23 @@ export default function ScanCanvas({
         onViewModeChange={setViewMode}
         splatAvailable={Boolean(splatUrl)}
       />
+      {status && (
+        <div
+          className={
+            'pointer-events-none absolute right-4 top-4 z-20 rounded px-3 py-1.5 text-[11px] text-white shadow ' +
+            (status.kind === 'error' ? 'bg-red-700/90' : 'bg-neutral-900/85')
+          }
+        >
+          {status.text}
+        </div>
+      )}
+      <div
+        ref={canvasWrapRef}
+        className="absolute inset-0"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
       <Canvas
         shadows
         camera={{
@@ -132,6 +297,7 @@ export default function ScanCanvas({
           far: 200,
         }}
       >
+        <CameraGrabber refOut={cameraRef} />
         <color attach="background" args={['#dad3c5']} />
         <ambientLight intensity={0.5} />
         <hemisphereLight color="#fff5e8" groundColor="#cfb997" intensity={0.55} />
@@ -153,8 +319,17 @@ export default function ScanCanvas({
         />
 
         {room.floors.map((f) => (
-          <FloorMesh key={f.identifier} floor={f} viewMode={viewMode} />
+          <FloorMesh
+            key={f.identifier}
+            floor={f}
+            viewMode={viewMode}
+            onFloorClick={mode === 'orbit' ? onFloorClick : undefined}
+          />
         ))}
+
+        {compartmentBounds && (
+          <CompartmentBox bounds={compartmentBounds} floorY={floorY} height={ceilingHeight} />
+        )}
 
         {room.walls.map((w) => (
           <WallWithHoles
@@ -187,15 +362,50 @@ export default function ScanCanvas({
             catalog={catalog}
             originOffset={originOffset}
             floorY={floorY}
+            mode={mode}
+            drag={drag}
+            setDrag={setDrag}
+            onCommitMove={async (id, fx, fz, ry) => {
+              try {
+                const res = (await fetch(`/api/placements/${id}`, {
+                  method: 'PATCH',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ x: fx, z: fz, rotation_y: ry }),
+                }).then((r) => r.json())) as PlaceResult | { ok: false; reason: string };
+                if (res.ok) onRefresh?.();
+                else flashStatus(failureMsg(res));
+              } catch (err) {
+                console.error('PATCH placement failed', err);
+                flashStatus('Network error');
+              }
+            }}
+            toFloor={toFloor}
           />
         ))}
+
+        {ghostItem && ghost && (
+          <GhostBox item={ghostItem} wx={ghost.wx} wz={ghost.wz} floorY={floorY} />
+        )}
 
         {splatUrl && viewMode !== 'wireframe' && (
           <SplatLayer url={splatUrl} visible={true} />
         )}
 
+        {tree && (
+          <TreeDebugOverlay
+            tree={tree}
+            room={room}
+            placements={placements}
+            originOffset={originOffset}
+            floorY={floorY}
+            ceilingHeight={ceilingHeight}
+            hoveredNodeId={hoveredNodeId ?? null}
+            onNodeHover={onNodeHover}
+          />
+        )}
+
         {mode === 'orbit' ? (
-          <OrbitControls target={cameraTarget} makeDefault />
+          <OrbitControls target={cameraTarget} makeDefault enabled={drag === null} />
         ) : (
           <>
             <PointerLockControls />
@@ -207,8 +417,66 @@ export default function ScanCanvas({
           </>
         )}
       </Canvas>
+      </div>
     </>
   );
+}
+
+/** Captures the R3F default camera into a parent ref so we can raycast from
+ *  outside the Canvas tree (HTML5 drop events live on the wrapping div). */
+function CameraGrabber({ refOut }: { refOut: MutableRefObject<THREE.Camera | null> }) {
+  const { camera } = useThree();
+  useEffect(() => {
+    refOut.current = camera;
+    return () => {
+      refOut.current = null;
+    };
+  }, [camera, refOut]);
+  return null;
+}
+
+/** Translucent box rendered on the floor at the cursor world position while
+ *  a catalog drag is in flight. Sized from the catalog item's footprint so
+ *  the user sees roughly where the piece will land. No collision check —
+ *  feedback comes after drop via the toast. */
+function GhostBox({
+  item,
+  wx,
+  wz,
+  floorY,
+}: {
+  item: CatalogItem;
+  wx: number;
+  wz: number;
+  floorY: number;
+}) {
+  const { w, d, h } = item.dimensions;
+  return (
+    <group position={[wx, floorY + h / 2, wz]}>
+      <mesh>
+        <boxGeometry args={[w, h, d]} />
+        <meshStandardMaterial color="#3b82f6" transparent opacity={0.32} depthWrite={false} />
+      </mesh>
+      <mesh position={[0, -h / 2 + 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[w, d]} />
+        <meshBasicMaterial color="#3b82f6" transparent opacity={0.5} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
+
+function failureMsg(res: { ok: false; reason: string; blocking?: PlaceFailure['blocking'] }): string {
+  if (res.reason === 'collision') {
+    const kind = res.blocking?.[0]?.kind;
+    if (kind === 'wall') return 'Blocked by wall';
+    if (kind === 'existing') return 'Blocked by existing furniture';
+    if (kind === 'placement') return 'Blocked by another piece';
+    return 'Collision';
+  }
+  if (res.reason === 'out_of_bounds') return 'Out of bounds';
+  if (res.reason === 'item_not_found') return 'Item not in catalog';
+  if (res.reason === 'placement_not_found') return 'Placement not found';
+  return res.reason;
 }
 
 function ModeHud({
@@ -524,7 +792,15 @@ function SurfaceMesh({
   );
 }
 
-function FloorMesh({ floor, viewMode }: { floor: Surface; viewMode: ViewMode }) {
+function FloorMesh({
+  floor,
+  viewMode,
+  onFloorClick,
+}: {
+  floor: Surface;
+  viewMode: ViewMode;
+  onFloorClick?: (point: Vec2) => void;
+}) {
   const t = useMemo(() => decomposeTransform(floor.transform), [floor.transform]);
   const quat = new THREE.Quaternion(
     t.quaternion[0],
@@ -552,8 +828,19 @@ function FloorMesh({ floor, viewMode }: { floor: Surface; viewMode: ViewMode }) 
   const transparent = viewMode === 'hybrid';
   const opacity = viewMode === 'hybrid' ? 0.25 : 1;
 
+  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
+    if (!onFloorClick) return;
+    e.stopPropagation();
+    onFloorClick({ x: e.point.x, z: e.point.z });
+  };
+
   return (
-    <mesh position={t.position} quaternion={quat} receiveShadow>
+    <mesh
+      position={t.position}
+      quaternion={quat}
+      receiveShadow
+      onPointerDown={onFloorClick ? handlePointerDown : undefined}
+    >
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
         color="#a08869"
@@ -658,11 +945,21 @@ function PlacementMesh({
   catalog,
   originOffset,
   floorY,
+  mode,
+  drag,
+  setDrag,
+  onCommitMove,
+  toFloor,
 }: {
   placement: Placement;
   catalog: CatalogItem[];
   originOffset?: Vec3;
   floorY: number;
+  mode: Mode;
+  drag: DragState | null;
+  setDrag: (d: DragState | null | ((prev: DragState | null) => DragState | null)) => void;
+  onCommitMove: (id: string, fx: number, fz: number, ry: number) => void | Promise<void>;
+  toFloor: (worldX: number, worldZ: number) => Vec2;
 }) {
   const item = catalog.find((c) => c.id === placement.catalog_item_id);
   const offsetX = originOffset?.x ?? 0;
@@ -671,18 +968,29 @@ function PlacementMesh({
   const worldZ = placement.position.z + offsetZ;
   const url = item?.model_path && item.model_path.endsWith('.glb') ? item.model_path : null;
 
+  const isDragging = drag?.id === placement.id;
+  // While dragging this placement, render against the optimistic state so the
+  // mesh follows the cursor without a server round-trip. On PATCH failure the
+  // parent clears `drag` and we fall back to `placement.*` (the unchanged
+  // server-side position) — automatic revert.
+  const renderX = isDragging ? drag!.worldX : worldX;
+  const renderZ = isDragging ? drag!.worldZ : worldZ;
+  const renderRotY = isDragging ? drag!.rotation_y : placement.rotation_y;
+
+  const { w, d, h } = placement.dimensions;
+
   // Box fallback for stub items (model_path: "box:WxHxD") or while the GLB
   // suspends. Sized from the placement dimensions, sat on the floor.
   const fallback = (
-    <group position={[worldX, floorY + placement.dimensions.h / 2, worldZ]} rotation={[0, placement.rotation_y, 0]}>
+    <group position={[renderX, floorY + h / 2, renderZ]} rotation={[0, renderRotY, 0]}>
       <mesh castShadow>
-        <boxGeometry args={[placement.dimensions.w, placement.dimensions.h, placement.dimensions.d]} />
+        <boxGeometry args={[w, h, d]} />
         <meshStandardMaterial color="#a16207" roughness={0.7} transparent opacity={0.85} />
       </mesh>
       <Html
         center
         distanceFactor={8}
-        position={[0, placement.dimensions.h / 2 + 0.15, 0]}
+        position={[0, h / 2 + 0.15, 0]}
         style={{ pointerEvents: 'none' }}
       >
         <div className="whitespace-nowrap rounded bg-amber-600/85 px-2 py-0.5 text-[10px] font-medium text-white">
@@ -692,19 +1000,76 @@ function PlacementMesh({
     </group>
   );
 
-  if (!url) return fallback;
+  // Invisible hit proxy that owns all pointer events for this placement.
+  // Lives outside the Suspense boundary so useGLTF resolving mid-drag doesn't
+  // remount and drop pointer capture. Sized to the placement footprint.
+  const hitProxy = (
+    <mesh
+      visible={false}
+      position={[renderX, floorY + h / 2, renderZ]}
+      rotation={[0, renderRotY, 0]}
+      onPointerDown={(e) => {
+        if (mode !== 'orbit') return;
+        e.stopPropagation();
+        const target = e.target as Element & { setPointerCapture?: (id: number) => void };
+        target.setPointerCapture?.(e.pointerId);
+        setDrag({
+          id: placement.id,
+          worldX: renderX,
+          worldZ: renderZ,
+          rotation_y: placement.rotation_y,
+          mode: e.shiftKey ? 'rotate' : 'translate',
+        });
+      }}
+      onPointerMove={(e) => {
+        if (drag?.id !== placement.id) return;
+        e.stopPropagation();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY);
+        const hit = new THREE.Vector3();
+        if (!e.ray.intersectPlane(plane, hit)) return;
+        if (drag.mode === 'translate') {
+          setDrag((prev) => (prev ? { ...prev, worldX: hit.x, worldZ: hit.z } : prev));
+        } else {
+          // Angle from placement center (which doesn't move during rotate) to
+          // the cursor's floor projection. Three.js Y-up → atan2(z, x) is the
+          // yaw matching RoomPlan's rotation_y convention.
+          const angle = Math.atan2(hit.z - drag.worldZ, hit.x - drag.worldX);
+          setDrag((prev) => (prev ? { ...prev, rotation_y: angle } : prev));
+        }
+      }}
+      onPointerUp={(e) => {
+        if (drag?.id !== placement.id) return;
+        e.stopPropagation();
+        const captured = drag;
+        setDrag(null);
+        const { x, z } = toFloor(captured.worldX, captured.worldZ);
+        void onCommitMove(captured.id, x, z, captured.rotation_y);
+      }}
+    >
+      <boxGeometry args={[w, h, d]} />
+      <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+    </mesh>
+  );
+
   return (
-    <Suspense fallback={fallback}>
-      <PlacedGlb
-        url={url}
-        worldX={worldX}
-        worldZ={worldZ}
-        floorY={floorY}
-        rotationY={placement.rotation_y}
-        label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
-        labelHeight={placement.dimensions.h}
-      />
-    </Suspense>
+    <>
+      {hitProxy}
+      {url ? (
+        <Suspense fallback={fallback}>
+          <PlacedGlb
+            url={url}
+            worldX={renderX}
+            worldZ={renderZ}
+            floorY={floorY}
+            rotationY={renderRotY}
+            label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
+            labelHeight={h}
+          />
+        </Suspense>
+      ) : (
+        fallback
+      )}
+    </>
   );
 }
 
@@ -742,5 +1107,59 @@ function PlacedGlb({
         </div>
       </Html>
     </group>
+  );
+}
+
+/** Wireframe-style box outline showing the active compartment in 3D.
+ *  Bounds are world-space, axis-aligned. We draw 12 edges of a box from
+ *  floor-Y to ceiling. */
+function CompartmentBox({
+  bounds,
+  floorY,
+  height,
+}: {
+  bounds: { min: Vec2; max: Vec2 };
+  floorY: number;
+  height: number;
+}) {
+  const positions = useMemo(() => {
+    const { min, max } = bounds;
+    const yLo = floorY + 0.01;
+    const yHi = floorY + height;
+    const c = [
+      [min.x, yLo, min.z],
+      [max.x, yLo, min.z],
+      [max.x, yLo, max.z],
+      [min.x, yLo, max.z],
+      [min.x, yHi, min.z],
+      [max.x, yHi, min.z],
+      [max.x, yHi, max.z],
+      [min.x, yHi, max.z],
+    ];
+    const edges: Array<[number, number]> = [
+      [0, 1], [1, 2], [2, 3], [3, 0], // floor square
+      [4, 5], [5, 6], [6, 7], [7, 4], // ceiling square
+      [0, 4], [1, 5], [2, 6], [3, 7], // verticals
+    ];
+    const arr: number[] = [];
+    for (const [a, b] of edges) {
+      arr.push(...c[a], ...c[b]);
+    }
+    return new Float32Array(arr);
+  }, [bounds, floorY, height]);
+
+  return (
+    <lineSegments>
+      <bufferGeometry>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[positions, 3]}
+          count={positions.length / 3}
+          array={positions}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <lineBasicMaterial color="#10b981" linewidth={2} />
+    </lineSegments>
   );
 }
