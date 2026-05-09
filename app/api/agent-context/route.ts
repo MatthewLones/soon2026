@@ -28,6 +28,9 @@ export async function GET() {
     schemaDoc: COMPACT_ROOM_DOC,
     defaultRolePrompt: DEFAULT_ROLE_PROMPT,
     placements: s.placements,
+    // The renderer is in raw RoomPlan world coords; agent state is in
+    // floor-centered coords. Add originOffset to convert: world = floor + offset.
+    originOffset: s.room.origin_offset,
     tokenEstimates: {
       json: estimateTokens(compactJson),
       summary: estimateTokens(s.room_summary),

@@ -2,26 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { CatalogItem } from '@/lib/agent/catalog';
-import type { CompactRoom } from '@/lib/room/serialize';
-import type { Placement } from '@/lib/room/grid';
+import type { AgentContext } from './scan-layout';
 
 type Tab = 'chat' | 'catalog' | 'prompt' | 'debug';
-
-type AgentContext = {
-  catalog: CatalogItem[];
-  compactRoom: CompactRoom;
-  compactRoomJson: string;
-  summary: string;
-  schemaDoc: string;
-  defaultRolePrompt: string;
-  placements: Placement[];
-  tokenEstimates: {
-    json: number;
-    summary: number;
-    schemaDoc: number;
-    rolePrompt: number;
-  };
-};
 
 type ChatEvent =
   | { type: 'tool_call'; id: string; name: string; input: unknown; t: number }
@@ -30,25 +13,20 @@ type ChatEvent =
   | { type: 'loop_aborted'; reason: string; t: number }
   | { type: 'error'; message: string; t?: number };
 
-export default function AgentPanel() {
+export default function AgentPanel({
+  ctx,
+  onRefresh,
+}: {
+  ctx: AgentContext | null;
+  onRefresh: () => void;
+}) {
   const [tab, setTab] = useState<Tab>('chat');
-  const [ctx, setCtx] = useState<AgentContext | null>(null);
   const [rolePromptDraft, setRolePromptDraft] = useState('');
 
-  const refresh = async () => {
-    try {
-      const r = await fetch('/api/agent-context', { cache: 'no-store' });
-      const j = (await r.json()) as AgentContext;
-      setCtx(j);
-      if (!rolePromptDraft) setRolePromptDraft(j.defaultRolePrompt);
-    } catch (e) {
-      console.error('agent-context fetch failed', e);
-    }
-  };
-
+  // Seed the role-prompt textarea once we have context.
   useEffect(() => {
-    refresh();
-  }, []);
+    if (ctx && !rolePromptDraft) setRolePromptDraft(ctx.defaultRolePrompt);
+  }, [ctx, rolePromptDraft]);
 
   return (
     <aside className="flex w-[440px] shrink-0 flex-col border-l border-neutral-300 bg-white text-neutral-900">
@@ -73,7 +51,7 @@ export default function AgentPanel() {
         {tab === 'chat' && (
           <ChatTab
             rolePromptOverride={rolePromptDraft !== ctx?.defaultRolePrompt ? rolePromptDraft : undefined}
-            onTurnComplete={refresh}
+            onTurnComplete={onRefresh}
           />
         )}
         {tab === 'catalog' && <CatalogTab catalog={ctx?.catalog ?? []} />}
@@ -300,7 +278,19 @@ function CatalogTab({ catalog }: { catalog: CatalogItem[] }) {
               ))}
             </div>
             <div className="mt-1 text-[11px] text-neutral-700">{item.description}</div>
-            <div className="mt-1 font-mono text-[10px] text-neutral-400">{item.id}</div>
+            <div className="mt-1 flex items-center justify-between text-[10px]">
+              <span className="font-mono text-neutral-400">{item.id}</span>
+              {item.asin && (
+                <a
+                  href={`https://www.amazon.com/dp/${item.asin}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:underline"
+                >
+                  amazon ↗
+                </a>
+              )}
+            </div>
           </div>
         ))}
       </div>
