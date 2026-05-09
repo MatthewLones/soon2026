@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /data/)",
+      "Read(//c//**)",
+      "Bash(curl -sI \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/metadata/3dmodels.csv.gz\")",
+      "Bash(curl -s \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/metadata/3dmodels.csv.gz\")",
+      "Bash(gunzip)",
+      "Bash(curl -sI \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/original/9/B075QFCHM9.glb\")"
+    ]
+  }
+}
