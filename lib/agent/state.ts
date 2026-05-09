@@ -171,7 +171,12 @@ function loadCatalog(): CatalogItem[] {
 }
 
 export function getSession(userId = 'demo_user'): Session {
-  if (cached && cached.user_id === userId) return cached;
+  if (cached && cached.user_id === userId) {
+    // Catalog reads from disk on every call so manual price edits to
+    // data/final_furniture.json show up without restarting the dev server.
+    cached.catalog = loadCatalog();
+    return cached;
+  }
   const room = loadRoom();
   cached = {
     user_id: userId,

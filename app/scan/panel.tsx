@@ -367,6 +367,8 @@ function EventCard({ event }: { event: ChatEvent }) {
 
 // ------------------------------ Catalog ------------------------------
 
+type SortMode = 'default' | 'price_asc' | 'price_desc';
+
 function CatalogTab({
   catalog,
   onDragStart,
@@ -378,8 +380,11 @@ function CatalogTab({
 }) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<string>('all');
+  const [sortMode, setSortMode] = useState<SortMode>('default');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const sortRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -391,6 +396,17 @@ function CatalogTab({
     document.addEventListener('mousedown', onClick);
     return () => document.removeEventListener('mousedown', onClick);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!sortOpen) return;
+    function onClick(e: MouseEvent) {
+      if (sortRef.current && !sortRef.current.contains(e.target as Node)) {
+        setSortOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [sortOpen]);
 
   const counts = useMemo(() => {
     const c = new Map<string, number>();
@@ -405,7 +421,18 @@ function CatalogTab({
     return hay.includes(query.toLowerCase());
   });
 
+  // Sort runs on every render against the live `catalog` prop, so manual
+  // price edits (after the in-memory cache is bypassed) re-order immediately.
+  const sorted = sortMode === 'default' ? filtered : [...filtered].sort((a, b) => {
+    const ap = a.price_usd ?? Number.POSITIVE_INFINITY;
+    const bp = b.price_usd ?? Number.POSITIVE_INFINITY;
+    return sortMode === 'price_asc' ? ap - bp : bp - ap;
+  });
+
   const categoryLabel = category === 'all' ? `All (${catalog.length})` : `${prettyCategory(category)} (${counts.get(category) ?? 0})`;
+  const sortLabel =
+    sortMode === 'price_asc' ? 'Price ↑' :
+    sortMode === 'price_desc' ? 'Price ↓' : 'Sort';
 
   return (
     <div className="flex h-full flex-col">
@@ -418,6 +445,39 @@ function CatalogTab({
             placeholder="Search…"
             className="flex-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-xs focus:border-neutral-500 focus:outline-none"
           />
+          <div ref={sortRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setSortOpen((v) => !v)}
+              className="flex items-center gap-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-700 hover:border-neutral-400"
+            >
+              {sortLabel}
+              <span className="text-neutral-400">▾</span>
+            </button>
+            {sortOpen && (
+              <div className="absolute right-0 top-full z-10 mt-1 w-40 overflow-hidden rounded-md border border-neutral-200 bg-white shadow-lg">
+                {([
+                  ['default', 'Default'],
+                  ['price_asc', 'Price: Low → High'],
+                  ['price_desc', 'Price: High → Low'],
+                ] as Array<[SortMode, string]>).map(([mode, label]) => (
+                  <button
+                    type="button"
+                    key={mode}
+                    onClick={() => {
+                      setSortMode(mode);
+                      setSortOpen(false);
+                    }}
+                    className={`flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-neutral-50 ${
+                      sortMode === mode ? 'font-medium text-neutral-900' : 'text-neutral-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <div ref={menuRef} className="relative">
             <button
               type="button"
@@ -465,11 +525,11 @@ function CatalogTab({
           </div>
         </div>
         <div className="mt-1.5 text-[10px] text-neutral-500">
-          {filtered.length} / {catalog.length} items · drag a card into the room
+          {sorted.length} / {catalog.length} items · drag a card into the room
         </div>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        {filtered.map((item) => (
+        {sorted.map((item) => (
           <CatalogCard
             key={item.id}
             item={item}
