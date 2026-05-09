@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import Image from 'next/image';
 import type { CatalogItem } from '@/lib/agent/catalog';
 import type { AgentContext } from './scan-layout';
 
@@ -140,6 +141,7 @@ function ChatTab({
     setEvents([]);
     setStreaming(true);
     try {
+      console.log('[ChatTab] Sending to /api/chat…', input.slice(0, 80));
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -151,17 +153,23 @@ function ChatTab({
           maxToolIterations,
         }),
       });
+      console.log('[ChatTab] Response status:', res.status, res.statusText);
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
-        setEvents((e) => [...e, { type: 'error', message: text || `HTTP ${res.status}` }]);
+        console.error('[ChatTab] Non-OK response:', res.status, text);
+        setEvents((e) => [...e, { type: 'error', message: `HTTP ${res.status}: ${text || res.statusText}` }]);
         return;
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let frameCount = 0;
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          console.log('[ChatTab] Stream ended. Total SSE frames parsed:', frameCount);
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         // SSE frames: `event: TYPE\ndata: <json>\n\n`
         let idx;
@@ -172,16 +180,25 @@ function ChatTab({
           if (!dataLine) continue;
           try {
             const parsed = JSON.parse(dataLine.slice(6)) as ChatEvent;
+            frameCount++;
+            console.log('[ChatTab] SSE frame', frameCount, '→', parsed.type, 'name' in parsed ? (parsed as { name: string }).name : '');
             setEvents((e) => [...e, parsed]);
           } catch (err) {
-            console.error('bad SSE frame', frame, err);
+            console.error('[ChatTab] bad SSE frame', frame, err);
+            setEvents((e) => [...e, { type: 'error', message: `Bad SSE frame: ${frame.slice(0, 200)}` }]);
           }
         }
       }
+      if (frameCount === 0) {
+        console.warn('[ChatTab] Stream ended with 0 SSE frames \u2014 the agent may have failed silently');
+        setEvents((e) => [...e, { type: 'error', message: 'Stream ended with no events \u2014 check the terminal for server-side errors' }]);
+      }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[ChatTab] fetch threw:', msg);
       setEvents((evts) => [
         ...evts,
-        { type: 'error', message: e instanceof Error ? e.message : String(e) },
+        { type: 'error', message: msg },
       ]);
     } finally {
       setStreaming(false);
@@ -359,82 +376,184 @@ function CatalogTab({
   onDragStart?: (id: string) => void;
   onDragEnd?: () => void;
 }) {
-  const [filter, setFilter] = useState('');
+  const [query, setQuery] = useState('');
+  const [category, setCategory] = useState<string>('all');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [menuOpen]);
+
+  const counts = useMemo(() => {
+    const c = new Map<string, number>();
+    for (const item of catalog) c.set(item.category, (c.get(item.category) ?? 0) + 1);
+    return c;
+  }, [catalog]);
+
   const filtered = catalog.filter((item) => {
-    if (!filter) return true;
-    const hay = `${item.name} ${item.brand} ${item.category} ${item.style_tags.join(' ')}`.toLowerCase();
-    return hay.includes(filter.toLowerCase());
+    if (category !== 'all' && item.category !== category) return false;
+    if (!query) return true;
+    const hay = `${item.name} ${item.brand} ${item.category} ${item.color} ${item.material.join(' ')}`.toLowerCase();
+    return hay.includes(query.toLowerCase());
   });
+
+  const categoryLabel = category === 'all' ? `All (${catalog.length})` : `${prettyCategory(category)} (${counts.get(category) ?? 0})`;
+
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-neutral-200 bg-neutral-50/60 p-2">
-        <input
-          type="text"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter by name, brand, category, tag…"
-          className="w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs focus:border-neutral-500 focus:outline-none"
-        />
-        <div className="mt-1 text-[10px] text-neutral-500">
+      <div className="border-b border-neutral-200 bg-neutral-50/60 p-3">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search…"
+            className="flex-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-xs focus:border-neutral-500 focus:outline-none"
+          />
+          <div ref={menuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex items-center gap-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-700 hover:border-neutral-400"
+            >
+              {categoryLabel}
+              <span className="text-neutral-400">▾</span>
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 top-full z-10 mt-1 w-44 overflow-hidden rounded-md border border-neutral-200 bg-white shadow-lg">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCategory('all');
+                    setMenuOpen(false);
+                  }}
+                  className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-xs hover:bg-neutral-50 ${
+                    category === 'all' ? 'font-medium text-neutral-900' : 'text-neutral-700'
+                  }`}
+                >
+                  <span>All</span>
+                  <span className="text-neutral-400">{catalog.length}</span>
+                </button>
+                {[...counts.entries()]
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([cat, n]) => (
+                    <button
+                      type="button"
+                      key={cat}
+                      onClick={() => {
+                        setCategory(cat);
+                        setMenuOpen(false);
+                      }}
+                      className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-xs hover:bg-neutral-50 ${
+                        category === cat ? 'font-medium text-neutral-900' : 'text-neutral-700'
+                      }`}
+                    >
+                      <span>{prettyCategory(cat)}</span>
+                      <span className="text-neutral-400">{n}</span>
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="mt-1.5 text-[10px] text-neutral-500">
           {filtered.length} / {catalog.length} items · drag a card into the room
         </div>
       </div>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 text-xs">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {filtered.map((item) => (
-          <div
+          <CatalogCard
             key={item.id}
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-catalog-item', item.id);
-              e.dataTransfer.effectAllowed = 'copy';
-              onDragStart?.(item.id);
-            }}
-            onDragEnd={() => onDragEnd?.()}
-            className="cursor-grab select-none rounded border border-neutral-200 bg-white p-2 active:cursor-grabbing hover:border-neutral-400"
-          >
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="font-medium text-neutral-900">{item.name}</div>
-                <div className="text-[10px] text-neutral-500">
-                  {item.brand} · {item.category} · {item.color}
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="font-mono text-[11px]">${item.price_usd ?? '—'}</div>
-                <div className="text-[10px] text-neutral-500">
-                  {item.dimensions.w}×{item.dimensions.d}×{item.dimensions.h}m
-                </div>
-              </div>
-            </div>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {item.style_tags.map((t) => (
-                <span
-                  key={t}
-                  className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-600"
-                >
-                  {t}
-                </span>
-              ))}
-            </div>
-            <div className="mt-1 text-[11px] text-neutral-700">{item.description}</div>
-            <div className="mt-1 flex items-center justify-between text-[10px]">
-              <span className="font-mono text-neutral-400">{item.id}</span>
-              {item.asin && (
-                <a
-                  href={`https://www.amazon.com/dp/${item.asin}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-600 hover:underline"
-                >
-                  amazon ↗
-                </a>
-              )}
-            </div>
-          </div>
+            item={item}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+          />
         ))}
       </div>
     </div>
   );
+}
+
+function prettyCategory(c: string): string {
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+function CatalogCard({
+  item,
+  onDragStart,
+  onDragEnd,
+}: {
+  item: CatalogItem;
+  onDragStart?: (id: string) => void;
+  onDragEnd?: () => void;
+}) {
+  const subtitle = buildSubtitle(item);
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/x-catalog-item', item.id);
+        e.dataTransfer.effectAllowed = 'copy';
+        onDragStart?.(item.id);
+      }}
+      onDragEnd={() => onDragEnd?.()}
+      className="flex cursor-grab select-none items-stretch gap-3 rounded-lg border border-neutral-200 bg-white p-3 hover:border-neutral-300 active:cursor-grabbing">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="text-sm font-medium leading-tight text-neutral-900">{item.name}</div>
+        {subtitle && (
+          <div className="mt-1 truncate text-[11px] text-neutral-500">{subtitle}</div>
+        )}
+        <div className="mt-auto space-y-0.5 pt-3">
+          <div className="font-mono text-sm text-neutral-900">
+            {item.price_usd != null ? `$${item.price_usd}` : '—'}
+          </div>
+          {item.asin && (
+            <a
+              href={`https://www.amazon.com/dp/${item.asin}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block text-[11px] text-blue-600 hover:underline"
+            >
+              Amazon ↗
+            </a>
+          )}
+        </div>
+      </div>
+      <div className="relative aspect-square w-1/3 min-w-[120px] shrink-0 overflow-hidden rounded-md bg-neutral-50">
+        {item.thumbnail_path ? (
+          <Image
+            src={item.thumbnail_path}
+            alt={item.name}
+            fill
+            sizes="160px"
+            className="object-contain"
+            unoptimized
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-400">
+            no image
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function buildSubtitle(item: CatalogItem): string {
+  const parts: string[] = [];
+  const descriptor = item.material[0] ?? (item.color !== 'unspecified' ? item.color : undefined);
+  if (descriptor) parts.push(descriptor);
+  const { w, d, h } = item.dimensions;
+  parts.push(`${w} × ${d} × ${h} m`);
+  return parts.join(' · ');
 }
 
 // ------------------------------- Prompt ------------------------------
@@ -518,6 +637,99 @@ function PromptTab({
 // ------------------------------- Debug -------------------------------
 
 function DebugTab({ ctx }: { ctx: AgentContext | null }) {
+  const [healthStatus, setHealthStatus] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  async function checkHealth() {
+    setChecking(true);
+    const results: string[] = [];
+
+    // 1. Check agent-context endpoint
+    try {
+      const t0 = Date.now();
+      const r = await fetch('/api/agent-context', { cache: 'no-store' });
+      const dt = Date.now() - t0;
+      if (r.ok) {
+        const data = await r.json();
+        results.push(`✅ /api/agent-context → ${r.status} (${dt}ms) — ${data.catalog?.length ?? '?'} catalog items, ${data.placements?.length ?? 0} placements`);
+      } else {
+        const text = await r.text().catch(() => '');
+        results.push(`❌ /api/agent-context → ${r.status}: ${text.slice(0, 200)}`);
+      }
+    } catch (e) {
+      results.push(`❌ /api/agent-context → ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 2. Check chat endpoint with empty body (should return 400)
+    try {
+      const t0 = Date.now();
+      const r = await fetch('/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const dt = Date.now() - t0;
+      if (r.status === 400) {
+        results.push(`✅ /api/chat → 400 (expected for empty msg) (${dt}ms)`);
+      } else {
+        const text = await r.text().catch(() => '');
+        results.push(`⚠️ /api/chat → ${r.status} (${dt}ms): ${text.slice(0, 200)}`);
+      }
+    } catch (e) {
+      results.push(`❌ /api/chat → ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 3. Quick smoke-test: send a tiny prompt and see if we get any SSE frames
+    try {
+      results.push('🔄 Smoke test: sending "list placements" to /api/chat…');
+      const t0 = Date.now();
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'List current placements. Reply briefly.' }),
+      });
+      const dt = Date.now() - t0;
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        results.push(`❌ Smoke test HTTP ${r.status} (${dt}ms): ${text.slice(0, 300)}`);
+      } else if (!r.body) {
+        results.push(`❌ Smoke test: no response body (${dt}ms)`);
+      } else {
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let frames = 0;
+        const types: string[] = [];
+        const deadline = Date.now() + 30000; // 30s timeout
+        while (Date.now() < deadline) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const dl = frame.split('\n').find((l) => l.startsWith('data: '));
+            if (dl) {
+              try {
+                const p = JSON.parse(dl.slice(6)) as { type: string };
+                frames++;
+                types.push(p.type);
+              } catch { /* skip */ }
+            }
+          }
+        }
+        const elapsed = Date.now() - t0;
+        if (frames > 0) {
+          results.push(`✅ Smoke test OK: ${frames} SSE frames in ${elapsed}ms — types: ${types.join(', ')}`);
+        } else {
+          results.push(`❌ Smoke test: 0 SSE frames received in ${elapsed}ms — check terminal for server errors`);
+        }
+      }
+    } catch (e) {
+      results.push(`❌ Smoke test threw: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    setHealthStatus(results.join('\n'));
+    setChecking(false);
+  }
+
   if (!ctx) return <div className="p-4 text-xs text-neutral-500">loading…</div>;
   const stats = [
     ['walls', ctx.compactRoom.walls.length],
@@ -531,6 +743,29 @@ function DebugTab({ ctx }: { ctx: AgentContext | null }) {
   ];
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3 text-xs">
+      {/* Connectivity check */}
+      <section>
+        <div className="mb-1 flex items-center justify-between">
+          <h3 className="font-semibold uppercase tracking-wider text-neutral-700">API Health Check</h3>
+          <button
+            onClick={checkHealth}
+            disabled={checking}
+            className="rounded bg-neutral-900 px-3 py-1 text-[10px] font-medium text-white disabled:opacity-40"
+          >
+            {checking ? 'checking…' : 'Run Check'}
+          </button>
+        </div>
+        {healthStatus ? (
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border border-neutral-200 bg-neutral-50 p-2 font-mono text-[10px] text-neutral-800">
+            {healthStatus}
+          </pre>
+        ) : (
+          <div className="rounded border border-dashed border-neutral-300 p-2 text-center text-[10px] text-neutral-500">
+            Click &ldquo;Run Check&rdquo; to test API connectivity, Composio tools, and Anthropic
+          </div>
+        )}
+      </section>
+
       <section>
         <h3 className="mb-1 font-semibold uppercase tracking-wider text-neutral-700">Room shape</h3>
         <div className="rounded border border-neutral-200 bg-white p-2 font-mono text-[11px]">
@@ -590,6 +825,10 @@ function DebugTab({ ctx }: { ctx: AgentContext | null }) {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="text-[10px] text-neutral-400">
+        Tip: open browser DevTools console for client-side logs, and watch the terminal running <code>npm run dev</code> for server-side logs.
       </section>
     </div>
   );

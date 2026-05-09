@@ -58,6 +58,7 @@ function loadRoom(): Room {
 type AboRow = {
   item_id: string;
   '3dmodel_id': string;
+  main_image_id?: string | null;
   category: string;
   product_type: string;
   name: string;
@@ -72,6 +73,8 @@ type AboRow = {
   weight: { value: number; unit: string } | null;
   country?: string;
   url?: string;
+  price_usd?: number;
+  price_as_of?: string;
 };
 
 const INCH_TO_M = 0.0254;
@@ -130,9 +133,13 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
       : [],
     dimensions: { w: round2(w), d: round2(d), h: round2(h) },
     weight_kg: row.weight ? round2(row.weight.value * LB_TO_KG) : undefined,
+    price_usd: row.price_usd,
+    price_as_of: row.price_as_of,
     description: row.name, // ABO doesn't ship descriptions; fall back to name
     model_path: `/models/abo_${row['3dmodel_id']}.glb`,
-    thumbnail_path: undefined,
+    thumbnail_path: row.main_image_id
+      ? `https://images-na.ssl-images-amazon.com/images/I/${encodeURIComponent(row.main_image_id)}.jpg`
+      : undefined,
     source: 'abo',
   };
 }
