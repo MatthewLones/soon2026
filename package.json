@@ -15,6 +15,7 @@
     "@mkkellogg/gaussian-splats-3d": "^0.4.7",
     "@react-three/drei": "^10.0.0",
     "@react-three/fiber": "^9.0.0",
+    "backboard-sdk": "^1.5.14",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",

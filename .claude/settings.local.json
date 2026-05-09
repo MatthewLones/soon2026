@@ -6,7 +6,31 @@
       "Bash(curl -sI \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/metadata/3dmodels.csv.gz\")",
       "Bash(curl -s \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/metadata/3dmodels.csv.gz\")",
       "Bash(gunzip)",
-      "Bash(curl -sI \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/original/9/B075QFCHM9.glb\")"
+      "Bash(curl -sI \"https://amazon-berkeley-objects.s3.amazonaws.com/3dmodels/original/9/B075QFCHM9.glb\")",
+      "mcp__backboard-docs__get_page",
+      "mcp__backboard-docs__search_docs",
+      "Bash(xargs -I{} curl -s -X GET \"https://app.backboard.io/api/models?provider=anthropic\" -H \"X-API-Key: {}\")",
+      "Bash(xargs grep -l \"three\\\\|react-three\")",
+      "Bash(npx tsc *)",
+      "Bash(xargs grep -l \"house\\\\|House\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(xargs grep -l \"room\\\\|scene\\\\|SceneObject\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('scans/room.raw.json'\\)\\); print\\(json.dumps\\({k: type\\(v\\).__name__ for k,v in d.items\\(\\)}, indent=2\\)\\)\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\GitHub Projects\\\\soon2026\\\\data\\\\filters\" -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object Name)",
+      "Bash(Get-ChildItem -Path \"C:\\\\GitHub Projects\\\\soon2026\" -Directory)",
+      "Bash(Select-Object -ExpandProperty Name)",
+      "PowerShell(\\(Get-Content -Path \"C:\\\\GitHub Projects\\\\soon2026\\\\data\\\\final_furniture.json\" | Measure-Object -Line\\).Lines)",
+      "Bash(python 3d_filter.py)",
+      "Bash(python final_filter.py)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:3000/api/agent-context)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); items=d.get\\('catalog',[]\\); print\\(f'count={len\\(items\\)}'\\); print\\('first=', json.dumps\\(items[0] if items else None, indent=2\\)[:600]\\)\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/scan)",
+      "Bash(curl -s \"http://localhost:3000/api/agent-context\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); items=d.get\\('catalog',[]\\); print\\('items=',len\\(items\\)\\); have_img=[i for i in items if i.get\\('thumbnail_path'\\)]; print\\('with_img=',len\\(have_img\\)\\); print\\('sample_url=',have_img[0]['thumbnail_path'] if have_img else None\\)\")",
+      "Bash(curl *)",
+      "Bash(python -c 'import json *)"
     ]
   }
 }

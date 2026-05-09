@@ -45,6 +45,7 @@ function loadRoom(): Room {
 type AboRow = {
   item_id: string;
   '3dmodel_id': string;
+  main_image_id?: string | null;
   category: string;
   product_type: string;
   name: string;
@@ -119,7 +120,9 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
     weight_kg: row.weight ? round2(row.weight.value * LB_TO_KG) : undefined,
     description: row.name, // ABO doesn't ship descriptions; fall back to name
     model_path: `/models/abo_${row['3dmodel_id']}.glb`,
-    thumbnail_path: undefined,
+    thumbnail_path: row.main_image_id
+      ? `https://images-na.ssl-images-amazon.com/images/I/${encodeURIComponent(row.main_image_id)}.jpg`
+      : undefined,
     source: 'abo',
   };
 }
