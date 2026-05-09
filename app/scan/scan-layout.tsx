@@ -52,10 +52,16 @@ export default function ScanLayout({
    *  dataTransfer.getData() during dragover, so this is the only way to know
    *  which item is hovering. */
   const [draggingCatalogItemId, setDraggingCatalogItemId] = useState<string | null>(null);
-  /** Debug ("judge") mode: replaces the agent panel with a tree inspector
-   *  and overlays the canvas with compartment AABBs, wall labels, and
-   *  free-space halos. */
-  const [debugMode, setDebugMode] = useState(false);
+  /** Verbose mode (formerly "judge mode"): replaces the agent panel with a
+   *  tree inspector and overlays the canvas with compartment AABBs, free-span
+   *  markers, side-clearance arrows, and wall HUDs. For verifying the
+   *  algorithm's interpretation of the scan. */
+  const [verboseMode, setVerboseMode] = useState(false);
+  /** Labels mode: clean letter labels (A, B, C...) on each wall + Room 1/2/...
+   *  numbers in each room. Designed for natural-language chat — the user can
+   *  say "put a sofa on wall A" and the model translates the letter to the
+   *  underlying wall id when calling tools. Independent of verbose. */
+  const [labelsMode, setLabelsMode] = useState(false);
   /** Cross-pane hover sync: hovering a wall/object/room id in the panel
    *  highlights the corresponding 3D element, and vice versa. */
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -73,14 +79,16 @@ export default function ScanLayout({
     refresh();
   }, [refresh]);
 
-  // Keyboard shortcut: "J" toggles judge / debug mode. Skip when typing in
-  // an input or textarea so the chat composer isn't hijacked.
+  // Keyboard shortcuts:
+  //   "L" toggles label mode (clean letters for chat)
+  //   "V" toggles verbose mode (full debug breakdown)
+  // Skip when typing in an input/textarea so the chat composer isn't hijacked.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key !== 'j' && e.key !== 'J') return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      setDebugMode((v) => !v);
+      if (e.key === 'l' || e.key === 'L') setLabelsMode((v) => !v);
+      else if (e.key === 'v' || e.key === 'V') setVerboseMode((v) => !v);
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -149,24 +157,41 @@ export default function ScanLayout({
           compartmentBounds={compartmentBounds}
           onRefresh={refresh}
           draggingCatalogItemId={draggingCatalogItemId}
-          tree={debugMode ? ctx?.tree ?? null : null}
-          hoveredNodeId={debugMode ? hoveredNodeId : null}
-          onNodeHover={debugMode ? setHoveredNodeId : undefined}
+          tree={(labelsMode || verboseMode) ? ctx?.tree ?? null : null}
+          hoveredNodeId={verboseMode ? hoveredNodeId : null}
+          onNodeHover={verboseMode ? setHoveredNodeId : undefined}
+          labelsMode={labelsMode}
+          verboseMode={verboseMode}
         />
-        {/* Debug-mode toggle. Always visible so judges can flip it on demand. */}
-        <button
-          type="button"
-          onClick={() => setDebugMode((v) => !v)}
-          className={`absolute right-3 top-3 z-10 rounded px-3 py-1.5 text-[11px] font-semibold shadow transition ${
-            debugMode
-              ? 'bg-fuchsia-600 text-white hover:bg-fuchsia-500'
-              : 'bg-neutral-900/85 text-white hover:bg-neutral-800'
-          }`}
-          title="Toggle judge / debug mode (J)"
-        >
-          {debugMode ? '◉ judge mode' : '○ judge mode'}
-        </button>
-        {!debugMode && compartmentInfo && (
+        {/* Independent toggles. Labels = clean letters for chat (default UX);
+            Verbose = full algorithm-debug overlay + tree panel. */}
+        <div className="absolute right-3 top-3 z-10 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setLabelsMode((v) => !v)}
+            className={`rounded px-3 py-1.5 text-[11px] font-semibold shadow transition ${
+              labelsMode
+                ? 'bg-blue-600 text-white hover:bg-blue-500'
+                : 'bg-neutral-900/85 text-white hover:bg-neutral-800'
+            }`}
+            title="Toggle wall letter labels (L)"
+          >
+            {labelsMode ? '◉ labels' : '○ labels'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setVerboseMode((v) => !v)}
+            className={`rounded px-3 py-1.5 text-[11px] font-semibold shadow transition ${
+              verboseMode
+                ? 'bg-fuchsia-600 text-white hover:bg-fuchsia-500'
+                : 'bg-neutral-900/85 text-white hover:bg-neutral-800'
+            }`}
+            title="Toggle verbose / debug overlay (V)"
+          >
+            {verboseMode ? '◉ verbose' : '○ verbose'}
+          </button>
+        </div>
+        {!verboseMode && compartmentInfo && (
           <div className="pointer-events-none absolute bottom-3 left-3 rounded bg-emerald-700/90 px-3 py-1.5 text-[11px] text-white shadow">
             <div className="font-semibold">active compartment</div>
             <div>
@@ -176,13 +201,13 @@ export default function ScanLayout({
             <div className="text-[10px] opacity-75">click anywhere on the floor to repick</div>
           </div>
         )}
-        {!debugMode && !compartmentInfo && (
+        {!verboseMode && !compartmentInfo && (
           <div className="pointer-events-none absolute bottom-3 left-3 rounded bg-neutral-900/85 px-3 py-1.5 text-[11px] text-white shadow">
             <span>click on the floor to pick a room</span>
           </div>
         )}
       </div>
-      {debugMode ? (
+      {verboseMode ? (
         <TreeDebugPanel
           ctx={ctx}
           hoveredNodeId={hoveredNodeId}
