@@ -30,7 +30,16 @@
       "Bash(curl -s \"http://localhost:3000/api/agent-context\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); items=d.get\\('catalog',[]\\); print\\('items=',len\\(items\\)\\); have_img=[i for i in items if i.get\\('thumbnail_path'\\)]; print\\('with_img=',len\\(have_img\\)\\); print\\('sample_url=',have_img[0]['thumbnail_path'] if have_img else None\\)\")",
       "Bash(curl *)",
-      "Bash(python -c 'import json *)"
+      "Bash(python -c 'import json *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\GitHub Projects\\\\soon2026\" -Recurse -Force -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object FullName)",
+      "Bash(python3 *)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('data/filters/final_filter.py', doraise=True\\); print\\('OK'\\)\")",
+      "Bash(python data/filters/final_filter.py)",
+      "Bash(python -c ' *)",
+      "Bash(tasklist)",
+      "Bash(python *)",
+      "Bash(awk '{print $6, $7, $8}')"
     ]
   }
 }
