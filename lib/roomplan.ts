@@ -99,6 +99,18 @@ export function decomposeTransform(transform: number[]) {
   };
 }
 
+/** Project a world-space point into a surface's local frame. Wall planes live
+ *  in local XY, so the (x, y) of the result are the point's coordinates within
+ *  the wall, suitable for cutting holes via THREE.Shape. */
+export function worldPointInSurfaceLocal(
+  surfaceTransform: number[],
+  worldPoint: [number, number, number]
+): [number, number, number] {
+  const m = new THREE.Matrix4().fromArray(surfaceTransform).invert();
+  const v = new THREE.Vector3(worldPoint[0], worldPoint[1], worldPoint[2]).applyMatrix4(m);
+  return [v.x, v.y, v.z];
+}
+
 export const OBJECT_COLORS: Record<DetectedObjectCategory, string> = {
   storage: '#64748b',
   refrigerator: '#cbd5e1',
