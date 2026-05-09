@@ -2,8 +2,50 @@
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Html, PointerLockControls, useGLTF } from '@react-three/drei';
-import { Suspense, useMemo, useRef, useState, useEffect } from 'react';
+import { Suspense, useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
+
+/**
+ * Wraps drei's PointerLockControls so that the browser's
+ * "cannot acquire pointer lock immediately after exit" SecurityError
+ * is caught instead of becoming an unhandledRejection crash.
+ */
+function SafePointerLockControls() {
+  const { gl } = useThree();
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const original = canvas.requestPointerLock.bind(canvas);
+
+    canvas.requestPointerLock = function safeRequestPointerLock() {
+      try {
+        const result = original();
+        // Modern browsers return a Promise
+        if (result && typeof (result as unknown as Promise<void>).catch === 'function') {
+          (result as unknown as Promise<void>).catch((err: Error) => {
+            if (err.name === 'SecurityError') {
+              // Cooldown after Escape – safe to ignore
+              return;
+            }
+            throw err;
+          });
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'SecurityError') {
+          // Cooldown after Escape – safe to ignore
+          return;
+        }
+        throw err;
+      }
+    } as typeof canvas.requestPointerLock;
+
+    return () => {
+      canvas.requestPointerLock = original;
+    };
+  }, [gl]);
+
+  return <PointerLockControls />;
+}
 import type { Placement } from '@/lib/room/grid';
 import type { CatalogItem } from '@/lib/agent/catalog';
 import type { Vec3 } from '@/lib/room/normalize';
@@ -198,7 +240,7 @@ export default function ScanCanvas({
           <OrbitControls target={cameraTarget} makeDefault />
         ) : (
           <>
-            <PointerLockControls />
+            <SafePointerLockControls />
             <FirstPersonRig
               walls={collisionSegments}
               floorY={floorY}
