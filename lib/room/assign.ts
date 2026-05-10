@@ -99,9 +99,17 @@ function pickSpanForItem(node: WallNode, itemWidth: number, span_index?: number)
   return node.free_spans.reduce((best, s) => (s.length_m > best.length_m ? s : best));
 }
 
+// Raw ABO categories that prefer back-against-wall. Mirrors the optimizer's
+// SEATING_/TABLE_/STORAGE_CATEGORIES — kept in sync by hand for now.
+const BACK_TO_WALL_CATEGORIES = new Set([
+  'armchair', 'chair', 'lounge_chair', 'sofa', // seating
+  'table', 'nightstand',
+  'storage_cabinet', 'shelf', 'dresser_chest',
+  'bed',
+]);
+
 function categoryBackToWall(category: CatalogItem['category']): boolean {
-  // Most upholstered seating, beds, storage prefer back-against-wall.
-  return category === 'seating' || category === 'bed' || category === 'storage' || category === 'table';
+  return BACK_TO_WALL_CATEGORIES.has(category);
 }
 
 function chooseWallYaw(item: CatalogItem, axis: WallAxis): number {

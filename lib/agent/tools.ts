@@ -74,6 +74,19 @@ const fail = (error: string, data: unknown = {}): ToolEnvelope => ({
 const HEADING_VALUES = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
 const SIDE_VALUES = ['front', 'back', 'left', 'right'] as const;
 
+// Friendly category names the LLM sees → raw ABO categories the catalog stores.
+// Mirrors the deleted mapCategory helper in lib/agent/state.ts; kept here so
+// SEARCH_FURNITURE's structured filter actually matches.
+const FRIENDLY_TO_RAW_CATEGORIES: Record<string, string[]> = {
+  seating: ['armchair', 'chair', 'lounge_chair', 'sofa'],
+  table: ['table', 'nightstand'],
+  storage: ['storage_cabinet', 'shelf', 'dresser_chest'],
+  rug: ['rug'],
+  bed: ['bed'],
+  lighting: ['lamp', 'pendant'],
+  decor: ['decor'],
+};
+
 export async function registerTools(): Promise<void> {
   if (registered) return;
   const c = getComposio();
@@ -153,16 +166,17 @@ export async function registerTools(): Promise<void> {
     slug: 'SEARCH_FURNITURE',
     name: 'Search furniture catalog',
     description:
-      'Structured filter over the catalog with optional semantic ranking. Pass any combination of: ' +
-      'query (free text — when set, results are ranked by semantic similarity to the vibe of the ' +
-      'query, e.g. "warm minimalist" matches by feel, not literal words), category, max_price, ' +
-      'style_tags (any-of), color, material. Returns up to N items, each with a `_score` field ' +
-      'when semantic ranking is used (1.0 = perfect match).',
+      'Structured filter over the catalog with optional semantic ranking. ' +
+      'CATEGORY IS REQUIRED — decide what TYPE of furniture you need first (bed / seating / table / ' +
+      'storage / lighting / rug / decor), then rank within it. Never search across categories — that ' +
+      'invites picking a desk when you wanted a bed. Other params: query (free text — when set, ' +
+      'results are ranked by semantic similarity to the vibe of the query, e.g. "warm minimalist" ' +
+      'matches by feel, not literal words), max_price, style_tags (any-of), color, material. Each ' +
+      'returned item carries `id`, `short_label` (USE THIS in chat — never paraphrase the name), ' +
+      'and `_score` when semantic ranking is used.',
     inputParams: z.object({
+      category: z.enum(['seating', 'table', 'lighting', 'storage', 'rug', 'bed', 'decor']),
       query: z.string().optional(),
-      category: z
-        .enum(['seating', 'table', 'lighting', 'storage', 'rug', 'bed', 'decor'])
-        .optional(),
       max_price: z.number().optional(),
       min_price: z.number().optional(),
       style_tags: z.array(z.string()).optional(),
@@ -172,7 +186,24 @@ export async function registerTools(): Promise<void> {
     }),
     execute: async (input) => {
       const s = getSession();
-      const filters = input as Parameters<typeof searchCatalog>[1];
+      const raw = input as {
+        category: 'seating' | 'table' | 'lighting' | 'storage' | 'rug' | 'bed' | 'decor';
+        query?: string;
+        max_price?: number;
+        min_price?: number;
+        style_tags?: string[];
+        color?: string;
+        material?: string;
+        limit?: number;
+      };
+      // Map the friendly category the LLM sees to the raw ABO categories the
+      // catalog actually stores. Without this, passesStructuredFilters in
+      // catalog.ts (which does an array .includes against item.category) will
+      // never match — e.g. "seating".includes("sofa") is false.
+      const filters: Parameters<typeof searchCatalog>[1] = {
+        ...raw,
+        category: FRIENDLY_TO_RAW_CATEGORIES[raw.category],
+      };
       const trimmedQuery = filters.query?.trim();
 
       // Try semantic ranking when there's a query and the embeddings file is

@@ -91,8 +91,18 @@ function findObjectNode(tree: SemanticTree, target_id: string): ObjectNode | nul
   return null;
 }
 
+/** Raw ABO categories that count as "seating" for placement decisions —
+ *  these face their target by default and prefer back-to-wall. */
+const SEATING_CATEGORIES = new Set(['armchair', 'chair', 'lounge_chair', 'sofa']);
+const TABLE_CATEGORIES = new Set(['table', 'nightstand']);
+const STORAGE_CATEGORIES = new Set(['storage_cabinet', 'shelf', 'dresser_chest']);
+
 function categoryFacesTarget(category: CatalogItem['category']): boolean {
-  return category === 'seating';
+  return SEATING_CATEGORIES.has(category);
+}
+
+function categoryBackToWallOptimizer(category: CatalogItem['category']): boolean {
+  return SEATING_CATEGORIES.has(category) || category === 'bed' || STORAGE_CATEGORIES.has(category) || TABLE_CATEGORIES.has(category);
 }
 
 // ---------- Step 1: dependency order ----------
@@ -207,10 +217,7 @@ function chooseWallYaw(item: CatalogItem, axis: WallAxis): number {
   const baseline = axis.back_to_wall_yaw;
   if (anchor === 'left_arm') return baseline + Math.PI / 2;
   if (anchor === 'right_arm') return baseline - Math.PI / 2;
-  if (
-    anchor === 'none' ||
-    (!anchor && item.category !== 'seating' && item.category !== 'bed' && item.category !== 'storage' && item.category !== 'table')
-  ) {
+  if (anchor === 'none' || (!anchor && !categoryBackToWallOptimizer(item.category))) {
     return axis.axis_yaw;
   }
   return baseline;

@@ -62,6 +62,7 @@ type AboRow = {
   category: string;
   product_type: string;
   name: string;
+  short_label?: string;
   brand: string;
   color: string | null;
   material: string | null;
@@ -90,21 +91,10 @@ const availableGlbs: Set<string> = (() => {
   }
 })();
 
-function mapCategory(abo: string): CatalogItem['category'] | null {
-  const c = abo.toLowerCase();
-  if (['armchair', 'chair', 'lounge_chair', 'sofa'].includes(c)) return 'seating';
-  if (['table', 'nightstand'].includes(c)) return 'table';
-  if (['dresser_chest', 'storage_cabinet', 'shelf'].includes(c)) return 'storage';
-  if (c === 'rug') return 'rug';
-  if (c === 'bed') return 'bed';
-  if (['lamp', 'pendant'].includes(c)) return 'lighting';
-  return null;
-}
-
-/** Heuristic vibe tags from category, brand, and color so SEARCH_FURNITURE
- *  filters still work on real data (the ABO export doesn't include style
- *  metadata directly). Replace with real tags or vector search later. */
-function deriveStyleTags(row: AboRow, normalizedCategory: CatalogItem['category']): string[] {
+/** Heuristic vibe tags from name and color so SEARCH_FURNITURE's style_tags
+ *  filter has something to bite on. The ABO export doesn't ship style metadata,
+ *  so we derive from the product name. Replace with real tags later. */
+function deriveStyleTags(row: AboRow): string[] {
   const tags: string[] = [];
   const name = row.name.toLowerCase();
   if (name.includes('mid-century') || name.includes('mid century')) tags.push('mid-century');
@@ -115,15 +105,13 @@ function deriveStyleTags(row: AboRow, normalizedCategory: CatalogItem['category'
     tags.push('warm-wood');
   }
   if ((row.color ?? '').toLowerCase().includes('white')) tags.push('neutral');
-  if (normalizedCategory === 'lighting' || (row.color ?? '').toLowerCase().includes('brass')) tags.push('warm');
-  if (tags.length === 0) tags.push(normalizedCategory);
+  if (row.product_type === 'LAMP' || (row.color ?? '').toLowerCase().includes('brass')) tags.push('warm');
+  if (tags.length === 0) tags.push(row.category.toLowerCase());
   return [...new Set(tags)];
 }
 
 function adaptAboRow(row: AboRow): CatalogItem | null {
   if (!row.dimensions) return null; // can't place without a footprint
-  const cat = mapCategory(row.category);
-  if (!cat) return null;
   // ABO uses height/length/width with `length` being the depth (front-to-back)
   // and `width` being the side-to-side extent.
   const w = row.dimensions.width.value * INCH_TO_M;
@@ -136,11 +124,15 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
   return {
     id: `abo_${row.item_id}`,
     name: row.name,
+    short_label: row.short_label,
     brand: row.brand,
     asin: row.item_id,
-    product_type: row.product_type.toLowerCase(),
-    category: cat,
-    style_tags: deriveStyleTags(row, cat),
+    // Pass the raw ABO fields straight through. The LLM filters on these in
+    // SEARCH_FURNITURE; the placement engine enumerates the raw `category`
+    // values directly in its facing/back-to-wall predicates.
+    product_type: row.product_type,
+    category: row.category.toLowerCase(),
+    style_tags: deriveStyleTags(row),
     color: row.color ?? 'unspecified',
     material: row.material
       ? row.material.split(',').map((m) => m.trim().toLowerCase()).filter(Boolean)

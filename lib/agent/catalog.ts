@@ -12,10 +12,23 @@ import { cosine } from './embeddings';
 export type CatalogItem = {
   id: string;
   name: string;
+  /** Short, chat-friendly label generated server-side from the catalog row
+   *  (see scripts/generate_short_labels.ts). The LLM must quote this verbatim
+   *  in chat instead of paraphrasing `name` — it pins the displayed identity
+   *  to the row's actual ID, preventing the "headboard rendered as a desk"
+   *  failure mode where the model picks the wrong ASIN while narrating a
+   *  similar-but-different product name. */
+  short_label?: string;
   brand: string;
   asin?: string;
+  /** Raw ABO product_type (e.g. CHAIR, SOFA, LAMP, DESK, HEADBOARD). The LLM
+   *  filters on this in SEARCH_FURNITURE — it lets the LLM ask for "DESK" or
+   *  "LAMP" specifically when the user wants exactly that. */
   product_type: string;
-  category: 'seating' | 'table' | 'lighting' | 'storage' | 'rug' | 'bed' | 'decor';
+  /** Raw ABO category (e.g. chair, sofa, table, rug, bed, storage_cabinet).
+   *  The placement engine's facing/back-to-wall predicates enumerate these
+   *  values directly — see categoryFacesTarget / categoryBackToWall. */
+  category: string;
   style_tags: string[];
   color: string;
   material: string[];
@@ -38,7 +51,10 @@ export type CatalogItem = {
 
 export type SearchFilters = {
   query?: string;
-  category?: CatalogItem['category'];
+  /** OR'd: an item passes if its raw `category` is in the array. */
+  category?: string[];
+  /** OR'd: an item passes if its raw `product_type` is in the array. */
+  product_type?: string[];
   max_price?: number;
   min_price?: number;
   style_tags?: string[];
@@ -50,7 +66,8 @@ export type SearchFilters = {
 export type ScoredCatalogItem = CatalogItem & { _score?: number };
 
 function passesStructuredFilters(item: CatalogItem, filters: SearchFilters): boolean {
-  if (filters.category && item.category !== filters.category) return false;
+  if (filters.category && filters.category.length > 0 && !filters.category.includes(item.category)) return false;
+  if (filters.product_type && filters.product_type.length > 0 && !filters.product_type.includes(item.product_type)) return false;
   if (filters.max_price !== undefined && (item.price_usd ?? Infinity) > filters.max_price) return false;
   if (filters.min_price !== undefined && (item.price_usd ?? 0) < filters.min_price) return false;
   if (filters.color && !item.color.toLowerCase().includes(filters.color.toLowerCase())) return false;
