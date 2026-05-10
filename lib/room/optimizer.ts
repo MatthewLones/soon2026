@@ -268,7 +268,8 @@ function generateNextToCandidates(
   item: CatalogItem,
   targetWorld: { x: number; z: number; yaw: number; w: number; d: number },
   slotFraction: number,                 // along the side axis, 0..1
-  bucketSize: number                    // how many items share this side
+  bucketSize: number,                   // how many items share this side
+  targetIsWallAnchored: boolean         // suppresses face-target on left/right
 ): Candidate[] {
   const frame = localFrameOf(targetWorld.yaw);
   const dir = frame[assignment.side];
@@ -309,7 +310,16 @@ function generateNextToCandidates(
   //   side=left  (chair at -X): face +X → yaw=+π/2
   // Earlier versions had left/right inverted, which made flanking chairs face
   // away from the table even though the seats were positioned correctly.
-  const inferFace = categoryFacesTarget(item.category);
+  // Same-wall alignment heuristic: when the target is wall-anchored AND we're
+  // placing on its left/right side (which runs along the wall), the new item
+  // sits along the same wall too. Facing the target would rotate it
+  // perpendicular to the wall — wrong. Default to align-with-target so it
+  // inherits the wall-aligned yaw. front/back sides still face by default
+  // (chair facing a sofa from in front of it is correct). An explicit
+  // `face_target` on the assignment always wins.
+  const sideRunsAlongWall = assignment.side === 'left' || assignment.side === 'right';
+  const inferFace = categoryFacesTarget(item.category)
+    && !(targetIsWallAnchored && sideRunsAlongWall);
   const faceTarget = assignment.face_target ?? inferFace;
   const FACE_OFFSETS: Record<Side, number> = {
     front: Math.PI,
@@ -551,7 +561,28 @@ function candidatesForNextTo(a: NextToAssignment, item: CatalogItem, ctx: PlaceC
     ctx.bucketIndex.set(a.id, idx);
   }
   const slotFraction = N <= 1 ? 0.5 : (idx + 1) / (N + 1);
-  return generateNextToCandidates(a, item, tw, slotFraction, N);
+  const targetIsWallAnchored = isTargetWallAnchored(a.target_id, ctx);
+  return generateNextToCandidates(a, item, tw, slotFraction, N, targetIsWallAnchored);
+}
+
+/** A target is "wall-anchored" if its source assignment was ADD_TO_WALL, OR
+ *  if it's a kept room object whose semantic-tree entry reports a near_wall.
+ *  Used to suppress face-target rotation for chairs/side tables placed on a
+ *  wall-anchored item's left/right side — those should sit back-to-wall too,
+ *  not turn perpendicular to face the anchor. */
+function isTargetWallAnchored(target_id: string, ctx: PlaceCtx): boolean {
+  // Realized placement → look up its assignment.
+  const placed = ctx.realized.find((p) => p.id === target_id) ?? ctx.pinned.find((p) => p.id === target_id);
+  if (placed?.assignment_id) {
+    const a = ctx.allAssignments.find((x) => x.id === placed.assignment_id);
+    if (a?.kind === 'wall') return true;
+  }
+  // Kept detected object → semantic tree exposes near_wall when it hugs one.
+  for (const room of ctx.tree.building.rooms) {
+    const obj = room.objects.find((o) => o.id === target_id);
+    if (obj) return obj.near_wall != null;
+  }
+  return false;
 }
 
 function failureForEmpty(a: Assignment, item: CatalogItem, ctx: PlaceCtx): TryResult {

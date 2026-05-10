@@ -108,6 +108,8 @@ Design principles:
   • Bed: ADD_TO_WALL — headboard against wall.
   • Coffee table: ADD_NEXT_TO sofa, side="front", gap_m≈0.5.
   • Armchairs flanking a sofa: ADD_NEXT_TO sofa, side="left" + side="right" — engine pairs them, equidistant.
+    When the sofa is wall-anchored, the engine auto-aligns those flanking chairs with the sofa's
+    back-to-wall yaw instead of rotating them to face the sofa (overridable with face_target: true).
   • Side table next to sofa: ADD_NEXT_TO sofa, side="left"/"right", gap_m≈0.05.
   • Floor lamp behind a sofa or in a corner: ADD_NEXT_TO sofa, side="back" or ADD_TO_WALL.
   • Chairs around a dining table: 4 ADD_NEXT_TO calls, one per side — engine distributes; chair-faces-table is automatic for seating.

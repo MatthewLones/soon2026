@@ -124,10 +124,22 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
   if (!row.dimensions) return null; // can't place without a footprint
   const cat = mapCategory(row.category);
   if (!cat) return null;
-  // ABO uses height/length/width with `length` being the depth (front-to-back)
-  // and `width` being the side-to-side extent.
-  const w = row.dimensions.width.value * INCH_TO_M;
-  const d = row.dimensions.length.value * INCH_TO_M;
+  // ABO's `width` / `length` axis labels are inconsistent across product types:
+  //   - Chairs, beds, tables: `width` is the side-to-side extent (the wall-running
+  //     dim for back-to-wall items), `length` is the depth (front-to-back).
+  //   - Sofas, loveseats, sectionals, couches: REVERSED — `length` is the long
+  //     side (the wall-running extent, what the catalog title calls the "W"),
+  //     `width` is the depth.
+  // We detect the sofa case by name keywords and swap so the optimizer's OBB
+  // matches the rendered GLB orientation. Without this, sofas end up with the
+  // optimizer thinking they're 90"-deep cubes that stretch into the room and
+  // sit ~80cm off the wall instead of flush.
+  const nameLower = row.name.toLowerCase();
+  const isSofaLike = /\b(sofa|couch|loveseat|sectional)\b/.test(nameLower);
+  const aboW = row.dimensions.width.value * INCH_TO_M;
+  const aboL = row.dimensions.length.value * INCH_TO_M;
+  const w = isSofaLike && aboL > aboW ? aboL : aboW;
+  const d = isSofaLike && aboL > aboW ? aboW : aboL;
   const h = row.dimensions.height.value * INCH_TO_M;
   const glbName = `abo_${row['3dmodel_id']}.glb`;
   const modelPath = availableGlbs.has(glbName)
