@@ -45,14 +45,10 @@ npx tsx "$REPO_ROOT/scripts/frames-to-transforms.ts" \
 
 # 2. Train splats.
 OUT_PLY="$SCAN_DIR/room.ply"
-echo "[2/2] Training splats → $OUT_PLY"
+TRAIN_ITERS="${BRUSH_ITERS:-15000}"
+echo "[2/2] Training splats → $OUT_PLY ($TRAIN_ITERS iters)"
 
-if command -v brush >/dev/null 2>&1; then
-  brush train "$SCAN_DIR" \
-    --transforms "$SCAN_DIR/transforms.json" \
-    --output "$OUT_PLY" \
-    --max-iterations 15000
-else
+if ! command -v brush >/dev/null 2>&1; then
   cat <<EOF
 Error: 'brush' binary not found on PATH.
 
@@ -66,4 +62,24 @@ EOF
   exit 2
 fi
 
-echo "Done. Next: tsx scripts/snap-splats.ts $OUT_PLY scans/room.raw.json $SCAN_DIR/room.filtered.ply"
+# Brush 0.3 CLI: positional dataset path; `--export-path` is interpreted relative
+# to the dataset's parent dir; `{dataset}` interpolates to the dataset folder
+# name. So `--export-path ./{dataset}/` lands files inside $SCAN_DIR.
+# `--export-name room_{iter}.ply` → room_15000.ply at the final iteration.
+brush "$SCAN_DIR" \
+  --total-train-iters "$TRAIN_ITERS" \
+  --export-every "$TRAIN_ITERS" \
+  --export-path "./{dataset}/" \
+  --export-name "room_{iter}.ply"
+
+# Brush keeps every export (the {iter} is interpolated). Pick the latest and
+# rename to a stable filename for the snap-splats CLI.
+LATEST_PLY="$(ls -t "$SCAN_DIR"/room_*.ply 2>/dev/null | head -1 || true)"
+if [[ -z "$LATEST_PLY" ]]; then
+  echo "Error: brush finished but no room_*.ply was produced in $SCAN_DIR"
+  exit 3
+fi
+mv "$LATEST_PLY" "$OUT_PLY"
+echo "> wrote $OUT_PLY"
+
+echo "Done. Next: npx tsx scripts/snap-splats.ts $OUT_PLY scans/room.raw.json public/scans/room.filtered.ply"

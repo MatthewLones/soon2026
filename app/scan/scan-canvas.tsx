@@ -77,7 +77,7 @@ import {
   closestPointOnSegment,
 } from '@/lib/room/segments';
 import type { SemanticTree } from '@/lib/room/semantic_tree';
-import SplatLayer from './splat-layer';
+import SplatOverlay, { type SyncedCamera } from './splat-overlay';
 import TreeDebugOverlay from './tree-debug-overlay';
 
 type Mode = 'orbit' | 'walk';
@@ -105,6 +105,7 @@ type Status = { kind: 'error' | 'info'; text: string } | null;
 export default function ScanCanvas({
   room,
   splatUrl,
+  splatAlignment,
   placements = [],
   catalog = [],
   originOffset,
@@ -120,6 +121,10 @@ export default function ScanCanvas({
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
+  /** Yaw + pivot used by alignRoom() at scan-load time. The splats were
+   *  trained from un-rotated ARSession poses, so we re-apply this rotation at
+   *  render time to align them with the wireframe geometry. */
+  splatAlignment?: { yaw: number; pivot: [number, number, number] };
   /** Floor-centered placements from the agent. */
   placements?: Placement[];
   catalog?: CatalogItem[];
@@ -197,6 +202,9 @@ export default function ScanCanvas({
   // Drag-from-catalog and drag-existing-placement plumbing.
   const cameraRef = useRef<THREE.Camera | null>(null);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
+  /** Shared with the SplatOverlay outside the Canvas — written each frame by
+   *  CameraSplatBridge, read by the standalone splat viewer's RAF. */
+  const splatCameraRef = useRef<SyncedCamera | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [ghost, setGhost] = useState<{ wx: number; wz: number } | null>(null);
   const [status, setStatus] = useState<Status>(null);
@@ -336,17 +344,41 @@ export default function ScanCanvas({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+      {/* Splats render in their own canvas underneath R3F's Canvas. R3F's
+          Canvas is transparent when viewMode != wireframe so wireframe and
+          splats compose visually. */}
+      {splatUrl && (
+        <SplatOverlay
+          url={splatUrl}
+          cameraRef={splatCameraRef}
+          alignment={splatAlignment}
+          visible={viewMode !== 'wireframe'}
+          // DEBUG: locked on so we don't create two viewers (different control
+          // modes = different cache keys = two WebGL contexts). Restore the
+          // camera bridge after splats are confirmed visible.
+          useBuiltInControls={true}
+        />
+      )}
+      {viewMode !== 'splat' && (
       <Canvas
         shadows
+        gl={{ alpha: true, antialias: true }}
+        onCreated={({ gl }) => {
+          // Force a transparent clear so the splat overlay below shows through.
+          // R3F's gl.alpha:true gives us the alpha channel, but the renderer
+          // still defaults to clearAlpha=1 (opaque) without this.
+          gl.setClearColor(0x000000, 0);
+        }}
         camera={{
           position: [cameraTarget[0] + 8, cameraTarget[1] + 6, cameraTarget[2] + 8],
           fov: 55,
           near: 0.3,
           far: 200,
         }}
+        style={{ position: 'relative', zIndex: 1, background: 'transparent' }}
       >
         <CameraGrabber refOut={cameraRef} />
-        <color attach="background" args={['#dad3c5']} />
+        {viewMode === 'wireframe' && <color attach="background" args={['#dad3c5']} />}
         <ambientLight intensity={0.5} />
         <hemisphereLight color="#fff5e8" groundColor="#cfb997" intensity={0.55} />
         <directionalLight
@@ -435,8 +467,10 @@ export default function ScanCanvas({
           <GhostBox item={ghostItem} wx={ghost.wx} wz={ghost.wz} floorY={floorY} />
         )}
 
+        {/* Splats render via the SplatOverlay outside the Canvas (see below).
+            CameraSplatBridge keeps that overlay's camera in sync with R3F's. */}
         {splatUrl && viewMode !== 'wireframe' && (
-          <SplatLayer url={splatUrl} visible={true} />
+          <CameraSplatBridge syncRef={splatCameraRef} />
         )}
 
         {tree && (labelsMode || verboseMode) && (
@@ -467,6 +501,7 @@ export default function ScanCanvas({
           </>
         )}
       </Canvas>
+      )}
       </div>
     </>
   );
@@ -482,6 +517,28 @@ function CameraGrabber({ refOut }: { refOut: MutableRefObject<THREE.Camera | nul
       refOut.current = null;
     };
   }, [camera, refOut]);
+  return null;
+}
+
+/** Writes R3F camera state into a shared ref each frame so the standalone
+ *  splat viewer (rendered outside the Canvas) can mirror the camera. */
+function CameraSplatBridge({
+  syncRef,
+}: {
+  syncRef: MutableRefObject<SyncedCamera | null>;
+}) {
+  const { camera, size } = useThree();
+  useFrame(() => {
+    const persp = camera as THREE.PerspectiveCamera;
+    syncRef.current = {
+      position: [persp.position.x, persp.position.y, persp.position.z],
+      quaternion: [persp.quaternion.x, persp.quaternion.y, persp.quaternion.z, persp.quaternion.w],
+      fov: persp.fov ?? 55,
+      aspect: size.width / Math.max(size.height, 1),
+      near: persp.near ?? 0.1,
+      far: persp.far ?? 1000,
+    };
+  });
   return null;
 }
 
@@ -571,30 +628,36 @@ function ModeHud({
         </div>
       </div>
 
-      <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
-        <div className="flex gap-1">
-          {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
-            const disabled = !splatAvailable && v !== 'wireframe';
-            return (
-              <button
-                key={v}
-                onClick={() => !disabled && onViewModeChange(v)}
-                disabled={disabled}
-                className={
-                  'rounded px-3 py-1 text-xs font-medium transition ' +
-                  (viewMode === v
-                    ? 'bg-neutral-900 text-white'
-                    : disabled
-                    ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
-                    : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300')
-                }
-              >
-                {v}
-              </button>
-            );
-          })}
+      {/* View toggle (wireframe / hybrid / splat) hidden until splats are
+          wired back in. The plumbing below (viewMode state, SplatOverlay
+          mount, etc.) stays intact so flipping splatAvailable=true brings it
+          back without code changes. */}
+      {splatAvailable && (
+        <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
+          <div className="flex gap-1">
+            {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
+              const disabled = !splatAvailable && v !== 'wireframe';
+              return (
+                <button
+                  key={v}
+                  onClick={() => !disabled && onViewModeChange(v)}
+                  disabled={disabled}
+                  className={
+                    'rounded px-3 py-1 text-xs font-medium transition ' +
+                    (viewMode === v
+                      ? 'bg-neutral-900 text-white'
+                      : disabled
+                      ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
+                      : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300')
+                  }
+                >
+                  {v}
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

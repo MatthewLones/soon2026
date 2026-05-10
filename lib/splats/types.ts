@@ -71,7 +71,11 @@ export type SnapConfig = {
 };
 
 export const DEFAULT_SNAP_CONFIG: SnapConfig = {
-  minOpacity: 0.1,
+  // Brush spreads opacity across many overlapping splats (per-splat opacity is
+  // typically <0.1, accumulating to full alpha at render time). The geometric
+  // snap is the source of truth; opacity filter set near zero just to drop the
+  // few totally-degenerate splats. INRIA-trained PLYs tolerate ~0.10 here.
+  minOpacity: 0.001,
   maxScaleMeters: 0.3,
   projectToSurface: false,
 };

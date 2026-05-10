@@ -1,7 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -53,4 +53,8 @@ data/filters/abo-listings.tar
 # build pipeline (data/filters/3d_filter.py, build_final_furniture.py).
 # The runtime app uses data/final_furniture.json, which IS committed.
 data/filters/furniture1.json
+
+# Large binary assets (point clouds, splats) — too big for GitHub.
+# Keep out of git; regenerate locally from scans.
+*.ply
 

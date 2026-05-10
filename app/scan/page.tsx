@@ -6,6 +6,10 @@ import ScanLayout from './scan-layout';
 export const dynamic = 'force-dynamic';
 
 async function loadRoom(): Promise<RoomPlanRaw> {
+  // Original morning scan. The splat-side (room.splat.raw.json + splat
+  // alignment + PLY probing) is intentionally inactive right now — the splat
+  // infrastructure (lib/splats/*, app/scan/splat-overlay.tsx, etc.) stays in
+  // the tree but no PLY is fetched and no splat UI options are shown.
   const file = path.join(process.cwd(), 'scans', 'room.raw.json');
   const buf = await fs.readFile(file, 'utf-8');
   const parsed = JSON.parse(buf) as RoomPlanRaw;
@@ -16,26 +20,7 @@ async function loadRoom(): Promise<RoomPlanRaw> {
   return alignRoom(parsed);
 }
 
-async function findSplatUrl(): Promise<string | undefined> {
-  // Splats live under /public/scans/<scan-id>/ so they're served at
-  // /scans/<scan-id>/room.filtered.ply (or .ksplat). We probe a couple of
-  // canonical locations; if none exist, the canvas falls back to flat colors.
-  const candidates = [
-    'scans/room.filtered.ksplat',
-    'scans/room.filtered.ply',
-    'scans/room.ply',
-  ];
-  for (const rel of candidates) {
-    const abs = path.join(process.cwd(), 'public', rel);
-    try {
-      await fs.access(abs);
-      return '/' + rel;
-    } catch { /* keep probing */ }
-  }
-  return undefined;
-}
-
 export default async function ScanPage() {
-  const [room, splatUrl] = await Promise.all([loadRoom(), findSplatUrl()]);
-  return <ScanLayout room={room} splatUrl={splatUrl} />;
+  const room = await loadRoom();
+  return <ScanLayout room={room} />;
 }
