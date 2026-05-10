@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# large binary assets (point clouds, splats) — too big for GitHub
+*.ply
+

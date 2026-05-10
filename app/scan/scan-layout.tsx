@@ -11,6 +11,7 @@ import type { SemanticTree } from '@/lib/room/semantic_tree';
 import ScanCanvas from './scan-canvas';
 import AgentPanel from './panel';
 import TreeDebugPanel from './tree-debug-panel';
+import StartPartyButton from './start-party';
 
 export type AgentContext = {
   catalog: CatalogItem[];
@@ -41,9 +42,11 @@ export type AgentContext = {
 export default function ScanLayout({
   room,
   splatUrl,
+  splatAlignment,
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
+  splatAlignment?: { yaw: number; pivot: [number, number, number] };
 }) {
   const [ctx, setCtx] = useState<AgentContext | null>(null);
   /** World-space (x, z) click point that seeds compartment selection. */
@@ -172,6 +175,7 @@ export default function ScanLayout({
         <ScanCanvas
           room={room}
           splatUrl={splatUrl}
+          splatAlignment={splatAlignment}
           placements={ctx?.placements ?? []}
           catalog={ctx?.catalog ?? []}
           originOffset={ctx?.originOffset}
@@ -242,6 +246,7 @@ export default function ScanLayout({
               </button>
             );
           })()}
+          <StartPartyButton />
         </div>
         {/* Sidebar collapse tab — vertically centered, attached to the inner
             edge of the panel (or the right edge of the canvas when collapsed).
