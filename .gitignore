@@ -49,3 +49,8 @@ public/models/*.glb
 # runtime. Re-download from the ABO dataset if needed.
 data/filters/abo-listings.tar
 
+# Raw scraped catalog input (~54 MB). Only needed when re-running the
+# build pipeline (data/filters/3d_filter.py, build_final_furniture.py).
+# The runtime app uses data/final_furniture.json, which IS committed.
+data/filters/furniture1.json
+
