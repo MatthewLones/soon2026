@@ -58,3 +58,6 @@ data/filters/furniture1.json
 # Keep out of git; regenerate locally from scans.
 *.ply
 
+# ngrok config — contains an account auth token; keep local only.
+ngrok.yml
+
