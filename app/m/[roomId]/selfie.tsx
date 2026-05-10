@@ -33,6 +33,18 @@ export default function Selfie({
 
   const start = useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      // Almost always means the page is served over plain HTTP from a non-
+      // localhost origin (Chrome/Safari hide mediaDevices on insecure origins).
+      // Show a more honest error so future-you doesn't chase "browser support."
+      const insecure =
+        typeof window !== 'undefined' &&
+        window.location.protocol === 'http:' &&
+        window.location.hostname !== 'localhost';
+      setErrMsg(
+        insecure
+          ? 'This page must be served over HTTPS for the camera to work. Use an ngrok / Cloudflare tunnel or deploy to the cloud.'
+          : 'Camera API not available in this browser.'
+      );
       setPhase('unsupported');
       return;
     }
@@ -103,9 +115,9 @@ export default function Selfie({
   if (phase === 'unsupported') {
     return (
       <FullPage>
-        <h1 className="text-lg font-semibold">Browser not supported</h1>
-        <p className="mt-2 text-sm text-neutral-300">
-          This phone&rsquo;s browser doesn&rsquo;t expose a camera. Try Safari or Chrome.
+        <h1 className="text-lg font-semibold">Camera unavailable</h1>
+        <p className="mt-2 max-w-[320px] text-sm text-neutral-300">
+          {errMsg ?? 'This phone’s browser doesn’t expose a camera. Try Safari or Chrome.'}
         </p>
       </FullPage>
     );

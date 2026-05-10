@@ -3,10 +3,15 @@
  *
  *   selfie   → user takes a one-shot selfie
  *   orient   → "rotate to landscape" prompt; auto-advances on orientationchange
- *   joining  → WS connecting; show spinner until roster arrives
- *   playing  → POV scene + controller overlay
+ *   playing  → POV scene + controller overlay (gated by snapshot + landscape)
  *   ended    → host killed the party
  *   error    → unknown roomId, relay unreachable, etc.
+ *
+ * The WebSocket opens the moment the user has a faceDataUrl (post-selfie)
+ * and stays open until the component unmounts. The "playing" UI gates on
+ * landscape orientation AND a received roster — but the connection itself
+ * is independent of those, so we don't tear down + reconnect on each
+ * transition (which used to drop the live state stream — see git history).
  *
  * The face dataURL lives in component state (not localStorage) — refreshing
  * the page intentionally re-takes the selfie so the user can recover from
@@ -31,84 +36,57 @@ const RELAY_WS_URL =
 const MobileCanvas = dynamic(() => import('./mobile-canvas'), { ssr: false });
 const ControllerOverlay = dynamic(() => import('./controller'), { ssr: false });
 
-type Phase =
-  | { kind: 'selfie' }
-  | { kind: 'orient'; faceDataUrl: string }
-  | { kind: 'joining'; faceDataUrl: string }
-  | {
-      kind: 'playing';
-      faceDataUrl: string;
-      meId: string;
-      snapshot: RoomSnapshot;
-    }
-  | { kind: 'ended'; reason: string }
-  | { kind: 'error'; reason: string };
+type Stage = 'selfie' | 'orient' | 'playing' | 'ended' | 'error';
 
 export default function MobileClient({ roomId }: { roomId: string }) {
-  const [phase, setPhase] = useState<Phase>({ kind: 'selfie' });
+  const [stage, setStage] = useState<Stage>('selfie');
+  const [faceDataUrl, setFaceDataUrl] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
+  const [meId, setMeId] = useState<string | null>(null);
+  const [errReason, setErrReason] = useState<string | null>(null);
+  const [endedReason, setEndedReason] = useState<string | null>(null);
   const [players, setPlayers] = useState<Map<string, Player>>(new Map());
   const [hint, setHint] = useState(true);
+
   const clientRef = useRef<RelayClient | null>(null);
   const controllerRef = useRef<Controller | null>(null);
   const localStateRef = useRef<LocalState>({ x: 0, z: 0, yaw: 0, pitch: 0, waveSeq: 0 });
   const stateTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Track orientation. We don't lock — the API is unreliable on iOS — we just
-  // wait for the user to physically rotate.
-  const [isLandscape, setIsLandscape] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return window.innerWidth > window.innerHeight;
-  });
+  // SSR-safe: start as `false` on both server and client to avoid hydration
+  // mismatch, then update from window after mount.
+  const [isLandscape, setIsLandscape] = useState<boolean>(false);
   useEffect(() => {
-    const onResize = () => setIsLandscape(window.innerWidth > window.innerHeight);
-    window.addEventListener('resize', onResize);
-    window.addEventListener('orientationchange', onResize);
+    const update = () => setIsLandscape(window.innerWidth > window.innerHeight);
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
     return () => {
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('orientationchange', onResize);
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
     };
   }, []);
 
-  // Auto-advance from `orient` once the phone is landscape.
+  // Connect to relay the moment we have a face. Persists until unmount.
+  // Restart cause: roomId / faceDataUrl change. (Neither does in normal flow.)
   useEffect(() => {
-    if (phase.kind === 'orient' && isLandscape) {
-      setPhase({ kind: 'joining', faceDataUrl: phase.faceDataUrl });
-    }
-  }, [phase, isLandscape]);
-
-  // First-spawn hint fades after 3 seconds.
-  useEffect(() => {
-    if (phase.kind !== 'playing') return;
-    const t = setTimeout(() => setHint(false), 3000);
-    return () => clearTimeout(t);
-  }, [phase.kind]);
-
-  // Relay connection: open when we hit `joining`. Stay open through `playing`.
-  useEffect(() => {
-    if (phase.kind !== 'joining') return;
+    if (!faceDataUrl) return;
     const client = new RelayClient({
       url: RELAY_WS_URL,
       roomId,
-      faceDataUrl: phase.faceDataUrl,
+      faceDataUrl,
       onStatus: (s) => {
-        if (s === 'error') {
-          setPhase({ kind: 'error', reason: 'Connection error' });
-        }
+        if (s === 'error') setErrReason('Connection error');
       },
       onMessage: (msg) => {
         if (msg.type === 'roster') {
           const snap = msg.snapshot as RoomSnapshot;
+          setSnapshot(snap);
+          setMeId(msg.me.id);
           const m = new Map<string, Player>();
           for (const p of msg.players) m.set(p.id, p);
           setPlayers(m);
-          setPhase({
-            kind: 'playing',
-            faceDataUrl: phase.faceDataUrl,
-            meId: msg.me.id,
-            snapshot: snap,
-          });
-          // Seed the local state from the snapshot's spawn so the camera
-          // doesn't pop from (0,0,0).
+          // Seed local position from spawn so the camera doesn't pop from origin.
           localStateRef.current.x = snap.spawn.x;
           localStateRef.current.z = snap.spawn.z;
         } else if (msg.type === 'add') {
@@ -140,20 +118,18 @@ export default function MobileClient({ roomId }: { roomId: string }) {
             return next;
           });
         } else if (msg.type === 'spawn_changed') {
-          // Mid-party respawn — only future joiners care; existing players
-          // don't teleport.
+          // Mid-party respawn — only future joiners care.
         } else if (msg.type === 'ended') {
-          setPhase({ kind: 'ended', reason: msg.reason });
+          setEndedReason(msg.reason);
         } else if (msg.type === 'error') {
-          setPhase({ kind: 'error', reason: msg.reason });
+          setErrReason(msg.reason);
         }
       },
     });
     clientRef.current = client;
     client.open();
 
-    // Push local state to the relay-client buffer at frame rate; the
-    // relay-client's own 10 Hz timer flushes it over the wire.
+    // Push local state at frame rate; the client throttles to 10 Hz on the wire.
     stateTickRef.current = setInterval(() => {
       const ls = localStateRef.current;
       clientRef.current?.pushState({
@@ -170,10 +146,37 @@ export default function MobileClient({ roomId }: { roomId: string }) {
       client.close();
       clientRef.current = null;
     };
-  }, [phase.kind === 'joining', roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [faceDataUrl, roomId]);
+
+  // Stage transitions — derived from selfie / orientation / connection state.
+  useEffect(() => {
+    if (endedReason) {
+      setStage('ended');
+      return;
+    }
+    if (errReason) {
+      setStage('error');
+      return;
+    }
+    if (!faceDataUrl) {
+      setStage('selfie');
+      return;
+    }
+    if (!isLandscape || !snapshot || !meId) {
+      setStage('orient');
+      return;
+    }
+    setStage('playing');
+  }, [faceDataUrl, isLandscape, snapshot, meId, endedReason, errReason]);
+
+  useEffect(() => {
+    if (stage !== 'playing') return;
+    const t = setTimeout(() => setHint(false), 3000);
+    return () => clearTimeout(t);
+  }, [stage]);
 
   const onCapture = useCallback((dataUrl: string) => {
-    setPhase({ kind: 'orient', faceDataUrl: dataUrl });
+    setFaceDataUrl(dataUrl);
   }, []);
 
   const onWave = useCallback(() => {
@@ -182,51 +185,52 @@ export default function MobileClient({ roomId }: { roomId: string }) {
 
   const playerList = useMemo(() => [...players.values()], [players]);
 
-  if (phase.kind === 'selfie') {
+  if (stage === 'selfie') {
     return <Selfie onCapture={onCapture} />;
   }
 
-  if (phase.kind === 'orient') {
-    return <OrientPrompt />;
+  if (stage === 'orient') {
+    // While we're waiting on landscape OR roster, show the orient prompt.
+    return <OrientPrompt waitingForRoom={!snapshot} />;
   }
 
-  if (phase.kind === 'joining') {
+  if (stage === 'ended') {
     return (
       <FullPage>
-        <div className="text-2xl font-semibold">Joining the room…</div>
+        <div className="text-2xl font-semibold">Party ended</div>
+        <p className="mt-2 text-sm text-neutral-300">{endedReason}</p>
+      </FullPage>
+    );
+  }
+
+  if (stage === 'error') {
+    return (
+      <FullPage>
+        <div className="text-2xl font-semibold">Couldn&rsquo;t connect</div>
+        <p className="mt-2 max-w-[260px] text-center text-sm text-neutral-300">{errReason}</p>
+      </FullPage>
+    );
+  }
+
+  if (!snapshot || !meId) {
+    // Defensive — shouldn't reach here given the stage logic above.
+    return (
+      <FullPage>
+        <div className="text-2xl font-semibold">Joining…</div>
         <Spinner />
       </FullPage>
     );
   }
 
-  if (phase.kind === 'ended') {
-    return (
-      <FullPage>
-        <div className="text-2xl font-semibold">Party ended</div>
-        <p className="mt-2 text-sm text-neutral-300">{phase.reason}</p>
-      </FullPage>
-    );
-  }
-
-  if (phase.kind === 'error') {
-    return (
-      <FullPage>
-        <div className="text-2xl font-semibold">Couldn&rsquo;t connect</div>
-        <p className="mt-2 max-w-[260px] text-center text-sm text-neutral-300">{phase.reason}</p>
-      </FullPage>
-    );
-  }
-
-  // playing
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#dad3c5]">
       <MobileCanvas
-        snapshot={phase.snapshot}
+        snapshot={snapshot}
         players={playerList}
-        meId={phase.meId}
+        meId={meId}
         controllerRef={controllerRef}
         localStateRef={localStateRef}
-        spawn={phase.snapshot.spawn}
+        spawn={snapshot.spawn}
       />
       <ControllerOverlay controllerRef={controllerRef} onWave={onWave} />
       {hint && (
@@ -240,13 +244,15 @@ export default function MobileClient({ roomId }: { roomId: string }) {
   );
 }
 
-function OrientPrompt() {
+function OrientPrompt({ waitingForRoom }: { waitingForRoom: boolean }) {
   return (
     <FullPage>
       <div className="text-5xl">🔄</div>
       <div className="mt-4 text-2xl font-semibold">Rotate your phone</div>
       <p className="mt-2 max-w-[260px] text-center text-sm text-neutral-300">
-        The party plays in landscape mode.
+        {waitingForRoom
+          ? 'The party plays in landscape mode. Connecting in the background…'
+          : 'The party plays in landscape mode.'}
       </p>
     </FullPage>
   );

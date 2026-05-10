@@ -1,0 +1,10 @@
+version: "3"
+agent:
+  authtoken: 2vmqViHDGnq6NKGUQi5uFJQVZPp_5Mssk4mbJPmE172r8mWHv
+tunnels:
+  next:
+    proto: http
+    addr: 3000
+  relay:
+    proto: http
+    addr: 4001
