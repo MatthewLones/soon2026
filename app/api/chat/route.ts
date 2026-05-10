@@ -23,6 +23,11 @@ export async function POST(req: Request) {
     model?: 'sonnet' | 'opus';
     thinkingBudget?: number;
     maxToolIterations?: number;
+    /** Prior turns of the conversation, oldest first. Text-only — tool_use
+     *  blocks aren't replayed (the agent re-fetches via LIST_ROOMS etc.
+     *  if it needs prior tool state). Anthropic.MessageParam accepts
+     *  string content directly so this passes through unchanged. */
+    previousMessages?: { role: 'user' | 'assistant'; content: string }[];
   };
   const message = body.message;
   console.log('[chat/route] message:', message?.slice(0, 120), '...');
@@ -47,6 +52,7 @@ export async function POST(req: Request) {
           model: body.model,
           thinkingBudget: body.thinkingBudget,
           maxToolIterations: body.maxToolIterations,
+          previousMessages: body.previousMessages,
         });
         console.log('[chat/route] Agent turn completed:', result);
       } catch (err) {

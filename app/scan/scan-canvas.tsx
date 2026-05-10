@@ -1136,11 +1136,14 @@ function PlacementMesh({
 
   const { w, d, h } = placement.dimensions;
 
-  // Click-vs-drag arbitration: pointerdown stages a drag (so the cursor
-  // tracks the mesh from the first frame), but if the pointer never moves
-  // far enough, pointerup treats it as a click instead and routes to
-  // onSelect. Threshold is in screen pixels — ~5px feels native.
+  // Click-vs-drag arbitration: pointerdown stages a drag, but the
+  // optimistic position update is GATED on movement crossing the
+  // threshold. Below threshold the placement renders against its true
+  // position, so a small accidental move + release looks like a click —
+  // no visible jitter, no snap-back. Once the pointer crosses the
+  // threshold, the drag activates for the rest of the gesture.
   const pointerStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const dragActiveRef = useRef(false);
   const CLICK_THRESHOLD_PX = 5;
 
   // Box fallback for stub items (model_path: "box:WxHxD") or while the GLB
@@ -1193,6 +1196,7 @@ function PlacementMesh({
         const target = e.target as Element & { setPointerCapture?: (id: number) => void };
         target.setPointerCapture?.(e.pointerId);
         pointerStartRef.current = { clientX: e.clientX, clientY: e.clientY };
+        dragActiveRef.current = false;
         setDrag({
           id: placement.id,
           worldX: renderX,
@@ -1204,6 +1208,18 @@ function PlacementMesh({
       onPointerMove={(e) => {
         if (drag?.id !== placement.id) return;
         e.stopPropagation();
+        // Don't engage the drag (and don't move the placement visually)
+        // until the pointer has crossed the click threshold. This is what
+        // prevents the "tiny accidental move → snap back" feel — below
+        // threshold, the mesh stays put and we'll treat the gesture as a
+        // click in pointerup.
+        if (!dragActiveRef.current) {
+          const start = pointerStartRef.current;
+          if (!start) return;
+          const moved = Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY);
+          if (moved < CLICK_THRESHOLD_PX) return;
+          dragActiveRef.current = true;
+        }
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY);
         const hit = new THREE.Vector3();
         if (!e.ray.intersectPlane(plane, hit)) return;
@@ -1221,17 +1237,12 @@ function PlacementMesh({
         if (drag?.id !== placement.id) return;
         e.stopPropagation();
         const captured = drag;
-        const start = pointerStartRef.current;
+        const wasActive = dragActiveRef.current;
         pointerStartRef.current = null;
+        dragActiveRef.current = false;
         setDrag(null);
-        // Treat as a click (select) if the pointer barely moved AND rotation
-        // didn't change — both mean the user tapped the item rather than
-        // dragging it.
-        const moved = start
-          ? Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY)
-          : Infinity;
-        const rotated = Math.abs(captured.rotation_y - placement.rotation_y) > 1e-3;
-        if (moved < CLICK_THRESHOLD_PX && !rotated) {
+        if (!wasActive) {
+          // Pointer never crossed the threshold → treat as a click.
           // Toggle: clicking an already-selected catalog item deselects it.
           // Selection is at the catalog level so identical duplicates (4
           // chairs of the same product) glow as a group.

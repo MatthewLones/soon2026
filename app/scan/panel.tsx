@@ -180,14 +180,27 @@ function ChatTab({
   async function send() {
     if (!input.trim() || streaming) return;
     const message = input;
+    // Build prior context BEFORE we mutate events. Text-only — tool_use /
+    // tool_result blocks aren't replayed; if the agent needs prior tool
+    // state it can re-fetch via LIST_ROOMS / INSPECT_ROOM (cheap), and
+    // skipping them avoids tool_use_id threading complexity.
+    const previousMessages = events
+      .filter(
+        (ev): ev is Extract<ChatEvent, { type: 'user_message' | 'assistant_message' }> =>
+          ev.type === 'user_message' || ev.type === 'assistant_message'
+      )
+      .map((ev) => ({
+        role: ev.type === 'user_message' ? ('user' as const) : ('assistant' as const),
+        content: ev.text,
+      }));
     setChatState((s) => ({
       ...s,
       input: '',
-      events: [{ type: 'user_message', text: message, t: Date.now() }],
+      events: [...s.events, { type: 'user_message', text: message, t: Date.now() }],
       streaming: true,
     }));
     try {
-      console.log('[ChatTab] Sending to /api/chat…', message.slice(0, 80));
+      console.log('[ChatTab] Sending to /api/chat…', message.slice(0, 80), `(history: ${previousMessages.length})`);
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -197,6 +210,7 @@ function ChatTab({
           model,
           thinkingBudget: thinkingOn ? thinkingBudget : 0,
           maxToolIterations,
+          previousMessages,
         }),
       });
       console.log('[ChatTab] Response status:', res.status, res.statusText);
@@ -351,13 +365,27 @@ function ChatTab({
               <span className="text-amber-700">role-prompt overridden</span>
             )}
           </div>
-          <button
-            onClick={send}
-            disabled={streaming || !input.trim()}
-            className="rounded bg-neutral-900 px-4 py-1.5 text-xs font-medium text-white disabled:opacity-40"
-          >
-            {streaming ? 'streaming…' : 'Send'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {events.length > 0 && (
+              <button
+                onClick={() =>
+                  setChatState((s) => ({ ...s, events: [], input: '' }))
+                }
+                disabled={streaming}
+                title="Clear chat history"
+                className="rounded border border-neutral-300 px-2 py-1.5 text-[10px] font-medium uppercase tracking-wider text-neutral-600 hover:bg-neutral-100 disabled:opacity-40"
+              >
+                Clear
+              </button>
+            )}
+            <button
+              onClick={send}
+              disabled={streaming || !input.trim()}
+              className="rounded bg-neutral-900 px-4 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {streaming ? 'streaming…' : 'Send'}
+            </button>
+          </div>
         </div>
       </div>
       </div>
