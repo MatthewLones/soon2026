@@ -88,6 +88,45 @@ const PLAYER_RADIUS = 0.35; // ~70cm shoulder-to-shoulder
 const EYE_HEIGHT = 1.65; // average human standing eye height
 const WALK_SPEED = 3.5; // m/s
 
+// Procedural bump maps for walls and floor. Generated once on first use
+// and shared across every instance of each surface family — no asset, no
+// fetch, ~64KB each on the GPU. The wall map is isotropic noise; the
+// floor map is the same noise but tiled with a stretched repeat so it
+// reads as soft wood-ish grain along one axis.
+let _wallBump: THREE.DataTexture | null = null;
+let _floorBump: THREE.DataTexture | null = null;
+
+function makeNoiseDataTexture(
+  size: number,
+  contrast: number,
+  repeat: [number, number]
+): THREE.DataTexture {
+  const data = new Uint8Array(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    const v = 128 + Math.floor((Math.random() - 0.5) * 255 * contrast);
+    data[i * 4] = v;
+    data[i * 4 + 1] = v;
+    data[i * 4 + 2] = v;
+    data[i * 4 + 3] = 255;
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeat[0], repeat[1]);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function getWallBump(): THREE.DataTexture {
+  if (!_wallBump) _wallBump = makeNoiseDataTexture(128, 0.35, [4, 4]);
+  return _wallBump;
+}
+
+function getFloorBump(): THREE.DataTexture {
+  if (!_floorBump) _floorBump = makeNoiseDataTexture(128, 0.45, [6, 24]);
+  return _floorBump;
+}
+
 /** State for an in-flight drag of an existing placement. The same struct
  *  covers both translate and shift-rotate (the mode is sticky for the
  *  drag). Optimistic worldX/worldZ/rotation_y drive the visible mesh until
@@ -205,7 +244,7 @@ export default function ScanCanvas({
   );
 
   const [mode, setMode] = useState<Mode>('orbit');
-  const [viewMode, setViewMode] = useState<ViewMode>(splatUrl ? 'hybrid' : 'wireframe');
+  const [viewMode, setViewMode] = useState<ViewMode>('wireframe');
 
   // Drag-from-catalog and drag-existing-placement plumbing.
   const cameraRef = useRef<THREE.Camera | null>(null);
@@ -303,15 +342,8 @@ export default function ScanCanvas({
     [mode, originOffset, raycastFloor, toFloor, onRefresh, flashStatus]
   );
 
-  // When entering walk mode, splats are the most immersive view; in orbit,
-  // hybrid lets the user see both reality and the AI's structural model.
-  // Wired into mode-change instead of a useEffect to keep state updates colocated
-  // with their trigger (and avoid cascading-render lint errors).
   const changeMode = (next: Mode) => {
     setMode(next);
-    if (!splatUrl) return;
-    if (next === 'walk' && viewMode === 'wireframe') setViewMode('splat');
-    else if (next === 'orbit' && viewMode === 'splat') setViewMode('hybrid');
   };
 
   useEffect(() => {
@@ -321,8 +353,7 @@ export default function ScanCanvas({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, viewMode, splatUrl]);
+  }, [mode]);
 
   const ghostItem =
     draggingCatalogItemId ? catalog.find((c) => c.id === draggingCatalogItemId) ?? null : null;
@@ -356,21 +387,20 @@ export default function ScanCanvas({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-      {/* Splats render in their own canvas underneath R3F's Canvas. R3F's
-          Canvas is transparent when viewMode != wireframe so wireframe and
-          splats compose visually. */}
-      {splatUrl && (
+      {/* Splat overlay temporarily disabled — wireframe-only for now.
+          Restore this block when splat is wired back into the UI; until
+          then, mounting it would still download the splat, allocate a
+          second WebGL context, and tick a per-frame loop even though
+          visible={false} hides it. */}
+      {/* {splatUrl && (
         <SplatOverlay
           url={splatUrl}
           cameraRef={splatCameraRef}
           alignment={splatAlignment}
           visible={viewMode !== 'wireframe'}
-          // DEBUG: locked on so we don't create two viewers (different control
-          // modes = different cache keys = two WebGL contexts). Restore the
-          // camera bridge after splats are confirmed visible.
           useBuiltInControls={true}
         />
-      )}
+      )} */}
       {viewMode !== 'splat' && (
       <Canvas
         shadows
@@ -391,11 +421,11 @@ export default function ScanCanvas({
       >
         <CameraGrabber refOut={cameraRef} />
         {viewMode === 'wireframe' && <color attach="background" args={['#dad3c5']} />}
-        <ambientLight intensity={0.5} />
-        <hemisphereLight color="#fff5e8" groundColor="#cfb997" intensity={0.55} />
+        <ambientLight intensity={0.4} />
+        <hemisphereLight color="#fff5e8" groundColor="#cfb997" intensity={0.7} />
         <directionalLight
           position={[10, 15, 10]}
-          intensity={1.1}
+          intensity={1.0}
           color="#fffbf0"
           castShadow
         />
@@ -855,6 +885,7 @@ function WallWithHoles({
     t.quaternion[2],
     t.quaternion[3]
   );
+  const bumpMap = useMemo(() => getWallBump(), []);
 
   const geometry = useMemo(() => {
     const [w, h] = wall.dimensions;
@@ -900,6 +931,9 @@ function WallWithHoles({
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
         color="#f1e8d8"
+        roughness={0.95}
+        bumpMap={bumpMap}
+        bumpScale={0.02}
         transparent={transparent}
         opacity={opacity}
         side={THREE.DoubleSide}
@@ -961,6 +995,7 @@ function FloorMesh({
     t.quaternion[2],
     t.quaternion[3]
   );
+  const bumpMap = useMemo(() => getFloorBump(), []);
 
   const geometry = useMemo(() => {
     if (floor.polygonCorners && floor.polygonCorners.length >= 3) {
@@ -996,9 +1031,11 @@ function FloorMesh({
     >
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
-        color="#a08869"
+        color="#d4b88a"
         side={THREE.DoubleSide}
-        roughness={0.85}
+        roughness={0.88}
+        bumpMap={bumpMap}
+        bumpScale={0.015}
         transparent={transparent}
         opacity={opacity}
       />
