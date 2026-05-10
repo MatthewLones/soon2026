@@ -50,6 +50,12 @@ function SafePointerLockControls() {
 
     return () => {
       canvas.requestPointerLock = original;
+      // Belt-and-suspenders: drei's PointerLockControls is supposed to
+      // release the lock on unmount, but a pending click on the canvas
+      // can re-acquire mid-teardown. Force-release if we're still locked.
+      if (typeof document !== 'undefined' && document.pointerLockElement === canvas) {
+        document.exitPointerLock();
+      }
     };
   }, [gl]);
 
@@ -360,6 +366,12 @@ export default function ScanCanvas({
   );
 
   const changeMode = (next: Mode) => {
+    // Releasing here (in addition to PointerLockControls' own cleanup) is
+    // what kills the "orbit grabs my pointer for a second" feel: the lock
+    // is gone before React even unmounts the walk-mode controls.
+    if (next === 'orbit' && typeof document !== 'undefined' && document.pointerLockElement) {
+      document.exitPointerLock();
+    }
     setMode(next);
   };
 
@@ -465,10 +477,6 @@ export default function ScanCanvas({
             onFloorClick={mode === 'orbit' ? onFloorClick : undefined}
           />
         ))}
-
-        {compartmentBounds && (
-          <CompartmentBox bounds={compartmentBounds} floorY={floorY} height={ceilingHeight} />
-        )}
 
         {room.walls.map((w) => (
           <WallWithHoles
@@ -1089,22 +1097,27 @@ function ObjectBox({
 
   const splatMode = viewMode === 'splat';
   const hybridMode = viewMode === 'hybrid';
+  // Walk mode is the immersive first-person view — labels would clutter
+  // it and break the "real space" feel.
+  const showLabel = mode !== 'walk';
 
   if (splatMode) {
     // Splats are the visible furniture; show only the label so the user can
     // still identify what the AI sees.
     return (
       <group position={t.position} quaternion={quat}>
-        <Html
-          center
-          distanceFactor={8}
-          position={[0, h / 2 + 0.15, 0]}
-          style={{ pointerEvents: 'none' }}
-        >
-          <div className="whitespace-nowrap rounded bg-white/55 px-2 py-0.5 text-[10px] font-medium text-neutral-600 italic">
-            {cat}
-          </div>
-        </Html>
+        {showLabel && (
+          <Html
+            center
+            distanceFactor={8}
+            position={[0, h / 2 + 0.15, 0]}
+            style={{ pointerEvents: 'none' }}
+          >
+            <div className="whitespace-nowrap rounded bg-white/55 px-2 py-0.5 text-[10px] font-medium text-neutral-600 italic">
+              {cat}
+            </div>
+          </Html>
+        )}
       </group>
     );
   }
@@ -1113,8 +1126,18 @@ function ObjectBox({
   const transparent = hybridMode;
   const depthWrite = !transparent;
 
+  // Sinks share the same Y as the storage they sit on/in, so the two
+  // bboxes z-fight. Lift sinks a few cm so the sink reads as set into
+  // the counter rather than fighting it for the same plane.
+  const yOffset = cat === 'sink' ? 0.05 : 0;
+  const groupPos: [number, number, number] = [
+    t.position[0],
+    t.position[1] + yOffset,
+    t.position[2],
+  ];
+
   return (
-    <group position={t.position} quaternion={quat}>
+    <group position={groupPos} quaternion={quat}>
       <mesh castShadow={!transparent} receiveShadow={!transparent}>
         <boxGeometry args={[w, h, d]} />
         <meshStandardMaterial
@@ -1125,16 +1148,18 @@ function ObjectBox({
           depthWrite={depthWrite}
         />
       </mesh>
-      <Html
-        center
-        distanceFactor={8}
-        position={[0, h / 2 + 0.15, 0]}
-        style={{ pointerEvents: 'none' }}
-      >
-        <div className="whitespace-nowrap rounded bg-neutral-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
-          {cat}
-        </div>
-      </Html>
+      {showLabel && (
+        <Html
+          center
+          distanceFactor={8}
+          position={[0, h / 2 + 0.15, 0]}
+          style={{ pointerEvents: 'none' }}
+        >
+          <div className="whitespace-nowrap rounded bg-neutral-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
+            {cat}
+          </div>
+        </Html>
+      )}
     </group>
   );
 }
@@ -1214,21 +1239,23 @@ function PlacementMesh({
           depthWrite={!isDragging}
         />
       </mesh>
-      <Html
-        center
-        distanceFactor={8}
-        position={[0, h / 2 + 0.15, 0]}
-        style={{ pointerEvents: 'none' }}
-      >
-        <div
-          className={
-            'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white ' +
-            (selected ? 'bg-purple-600/90' : 'bg-amber-600/85')
-          }
+      {mode !== 'walk' && (
+        <Html
+          center
+          distanceFactor={8}
+          position={[0, h / 2 + 0.15, 0]}
+          style={{ pointerEvents: 'none' }}
         >
-          {item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
-        </div>
-      </Html>
+          <div
+            className={
+              'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white ' +
+              (selected ? 'bg-purple-600/90' : 'bg-amber-600/85')
+            }
+          >
+            {item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
+          </div>
+        </Html>
+      )}
     </group>
   );
 
@@ -1324,6 +1351,7 @@ function PlacementMesh({
               labelHeight={h}
               dragging={isDragging}
               selected={selected}
+              showLabel={mode !== 'walk'}
             />
           </Suspense>
         </GlbErrorBoundary>
@@ -1366,6 +1394,7 @@ function PlacedGlb({
   labelHeight,
   dragging = false,
   selected = false,
+  showLabel = true,
 }: {
   url: string;
   worldX: number;
@@ -1374,6 +1403,7 @@ function PlacedGlb({
   rotationY: number;
   label: string;
   labelHeight: number;
+  showLabel?: boolean;
   /** While the user drags this placement, fade the model so the floor and
    *  other pieces underneath remain visible. We mutate the cloned scene's
    *  materials in an effect so opacity tracks the boolean. */
@@ -1446,25 +1476,27 @@ function PlacedGlb({
   return (
     <group position={[worldX, floorY, worldZ]} rotation={[0, rotationY, 0]}>
       <primitive object={scene} castShadow={!dragging} receiveShadow={!dragging} />
-      <Html
-        center
-        distanceFactor={8}
-        position={[0, labelHeight + 0.15, 0]}
-        style={{ pointerEvents: 'none' }}
-      >
-        <div
-          className={
-            'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white transition ' +
-            (selected
-              ? 'bg-purple-600/90'
-              : dragging
-                ? 'bg-emerald-700/40'
-                : 'bg-emerald-700/85')
-          }
+      {showLabel && (
+        <Html
+          center
+          distanceFactor={8}
+          position={[0, labelHeight + 0.15, 0]}
+          style={{ pointerEvents: 'none' }}
         >
-          {label}
-        </div>
-      </Html>
+          <div
+            className={
+              'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white transition ' +
+              (selected
+                ? 'bg-purple-600/90'
+                : dragging
+                  ? 'bg-emerald-700/40'
+                  : 'bg-emerald-700/85')
+            }
+          >
+            {label}
+          </div>
+        </Html>
+      )}
     </group>
   );
 }
