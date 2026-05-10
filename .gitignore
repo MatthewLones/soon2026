@@ -39,3 +39,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Large 3D model binaries — fetched locally via scripts/fetch-abo-models.ts.
+# Kept out of git so the repo stays cloneable in <50 MB. Collaborators run
+# the fetch script after cloning to populate public/models/.
+public/models/*.glb
+
+# ABO listings tarball — large source archive that nothing references at
+# runtime. Re-download from the ABO dataset if needed.
+data/filters/abo-listings.tar
+
+# Raw scraped catalog input (~54 MB). Only needed when re-running the
+# build pipeline (data/filters/3d_filter.py, build_final_furniture.py).
+# The runtime app uses data/final_furniture.json, which IS committed.
+data/filters/furniture1.json
+

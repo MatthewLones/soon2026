@@ -75,10 +75,20 @@ type AboRow = {
   url?: string;
   price_usd?: number;
   price_as_of?: string;
+  description?: string | null;
 };
 
 const INCH_TO_M = 0.0254;
 const LB_TO_KG = 0.453592;
+
+const MODELS_DIR = path.join(process.cwd(), 'public', 'models');
+const availableGlbs: Set<string> = (() => {
+  try {
+    return new Set(fs.readdirSync(MODELS_DIR).filter((f) => f.endsWith('.glb')));
+  } catch {
+    return new Set();
+  }
+})();
 
 function mapCategory(abo: string): CatalogItem['category'] | null {
   const c = abo.toLowerCase();
@@ -119,6 +129,10 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
   const w = row.dimensions.width.value * INCH_TO_M;
   const d = row.dimensions.length.value * INCH_TO_M;
   const h = row.dimensions.height.value * INCH_TO_M;
+  const glbName = `abo_${row['3dmodel_id']}.glb`;
+  const modelPath = availableGlbs.has(glbName)
+    ? `/models/${glbName}`
+    : `box:${round2(w)}x${round2(h)}x${round2(d)}`;
   return {
     id: `abo_${row.item_id}`,
     name: row.name,
@@ -135,8 +149,8 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
     weight_kg: row.weight ? round2(row.weight.value * LB_TO_KG) : undefined,
     price_usd: row.price_usd,
     price_as_of: row.price_as_of,
-    description: row.name, // ABO doesn't ship descriptions; fall back to name
-    model_path: `/models/abo_${row['3dmodel_id']}.glb`,
+    description: row.description?.trim() || row.name,
+    model_path: modelPath,
     thumbnail_path: row.main_image_id
       ? `https://images-na.ssl-images-amazon.com/images/I/${encodeURIComponent(row.main_image_id)}.jpg`
       : undefined,

@@ -14,6 +14,7 @@ import type { Room, Vec2 } from './normalize';
 import { type Grid, type Placement, buildGrid, obbHits, obbCorners, CELL_WALL, CELL_EXISTING } from './grid';
 import { regionOf, pointInPolygon } from './regions';
 import { snap, type Adjustment, type SnapOptions } from './snap';
+import { nextPlacementId } from './placement-id';
 
 export type PlaceInput = {
   catalog_item_id: string;
@@ -51,12 +52,6 @@ export type PlaceFailure = {
 };
 
 export type PlaceResult = PlaceSuccess | PlaceFailure;
-
-let placementCounter = 0;
-function nextPlacementId(prefix = 'p'): string {
-  placementCounter += 1;
-  return `${prefix}_${placementCounter.toString(36)}`;
-}
 
 /** Resolve a cell code from the grid back to a stable id (wall, existing
  *  object, or placement). */

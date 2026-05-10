@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/GitHub Projects/soon2026/**)",
+      "Bash(npx tsc *)"
+    ]
+  }
+}
