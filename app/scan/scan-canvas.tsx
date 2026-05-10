@@ -394,7 +394,6 @@ export default function ScanCanvas({
           cellColor="#a09889"
           sectionSize={1}
           sectionColor="#7e7466"
-          infiniteGrid
           fadeDistance={30}
         />
 
@@ -489,7 +488,13 @@ export default function ScanCanvas({
         )}
 
         {mode === 'orbit' ? (
-          <OrbitControls target={cameraTarget} makeDefault enabled={drag === null} />
+          <OrbitControls
+            target={cameraTarget}
+            makeDefault
+            enabled={drag === null}
+            minDistance={3}
+            maxDistance={25}
+          />
         ) : (
           <>
             <SafePointerLockControls />
@@ -822,7 +827,13 @@ function WallWithHoles({
       shape.holes.push(path);
     }
 
-    return new THREE.ShapeGeometry(shape);
+    const depth = 0.08;
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth,
+      bevelEnabled: false,
+    });
+    geo.translate(0, 0, -depth / 2);
+    return geo;
   }, [wall.transform, wall.dimensions, wall.polygonCorners, holes]);
 
   if (viewMode === 'splat') return null; // splats are the visible surface
@@ -834,7 +845,7 @@ function WallWithHoles({
     <mesh position={t.position} quaternion={quat}>
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
-        color="#f1e8d8"
+        color="#fbfaf6"
         transparent={transparent}
         opacity={opacity}
         side={THREE.DoubleSide}
