@@ -95,6 +95,12 @@ export default function AgentPanel({
     if (ctx && !rolePromptDraft) setRolePromptDraft(ctx.defaultRolePrompt);
   }, [ctx, rolePromptDraft, setRolePromptDraft]);
 
+  // Clicking a placement in the 3D canvas should reveal it in the cart so
+  // the user sees price/qty without an extra tab click.
+  useEffect(() => {
+    if (selectedCatalogItemId) setTab('cart');
+  }, [selectedCatalogItemId]);
+
   return (
     <aside className="flex w-[440px] shrink-0 flex-col border-l border-neutral-300 bg-white text-neutral-900">
       <div className="flex border-b border-neutral-200 bg-neutral-50/80">

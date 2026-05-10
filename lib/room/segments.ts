@@ -11,6 +11,8 @@ import * as THREE from 'three';
 import {
   type Surface,
   type DetectedObject,
+  type DetectedObjectCategory,
+  categoryOf,
   worldPointInSurfaceLocal,
 } from '@/lib/roomplan';
 
@@ -105,6 +107,71 @@ export function buildHolesByWall(
     }
   }
   return map;
+}
+
+/** Find the wall the object is pressed against — the wall whose plane is
+ *  closest to the object's center AND where the projection of that center
+ *  falls within the wall's [w, h] extent. Returns null if no wall qualifies
+ *  (e.g. free-standing object in the middle of the room). */
+function findWallForObject(obj: DetectedObject, walls: Surface[]): Surface | null {
+  const center = new THREE.Vector3(
+    obj.transform[12],
+    obj.transform[13],
+    obj.transform[14]
+  );
+  // Acceptable distance from object center to wall plane: half the
+  // object's depth + small margin. Free-standing objects far from any
+  // wall will exceed this and be ignored.
+  const maxDepth = Math.max(obj.dimensions[2] / 2 + 0.3, 0.5);
+  let best: { wall: Surface; dist: number } | null = null;
+  for (const wall of walls) {
+    const m = new THREE.Matrix4().fromArray(wall.transform);
+    const wallPos = new THREE.Vector3().setFromMatrixPosition(m);
+    const wallNormal = new THREE.Vector3(0, 0, 1).transformDirection(m);
+    const dist = Math.abs(center.clone().sub(wallPos).dot(wallNormal));
+    if (dist > maxDepth) continue;
+    const [lx, ly] = worldPointInSurfaceLocal(wall.transform, [
+      center.x,
+      center.y,
+      center.z,
+    ]);
+    const [w, h] = wall.dimensions;
+    if (Math.abs(lx) > w / 2 + 0.1) continue;
+    if (Math.abs(ly) > h / 2 + 0.5) continue;
+    if (!best || dist < best.dist) best = { wall, dist };
+  }
+  return best?.wall ?? null;
+}
+
+/** Build synthetic Surface-shaped holes from detected objects whose
+ *  category is in `cutCategories`. Useful for cases like fireplaces where
+ *  the object's bbox visually clips through the wall behind it — we punch
+ *  out the wall section so the object reads as set into the wall. */
+export function buildObjectHoles(
+  objects: DetectedObject[],
+  walls: Surface[],
+  cutCategories: DetectedObjectCategory[]
+): Surface[] {
+  const wanted = new Set(cutCategories);
+  const holes: Surface[] = [];
+  for (const obj of objects) {
+    if (!wanted.has(categoryOf(obj.category))) continue;
+    const wall = findWallForObject(obj, walls);
+    if (!wall) continue;
+    holes.push({
+      identifier: `obj-hole-${obj.identifier}`,
+      category: { opening: {} },
+      confidence: obj.confidence,
+      dimensions: [obj.dimensions[0], obj.dimensions[1], 0],
+      transform: obj.transform,
+      parentIdentifier: wall.identifier,
+      curve: null,
+      polygonCorners: [],
+      completedEdges: [],
+      story: obj.story,
+    });
+  }
+  return holes;
 }
 
 /** Closest point on segment ab to p. Used by the player rig and the grid

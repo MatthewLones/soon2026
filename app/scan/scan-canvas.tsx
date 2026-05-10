@@ -64,7 +64,6 @@ import {
   type Surface,
   type DetectedObject,
   categoryOf,
-  confidenceOf,
   decomposeTransform,
   worldPointInSurfaceLocal,
   OBJECT_COLORS,
@@ -74,6 +73,7 @@ import {
   buildWallSegments,
   buildObjectSegments,
   buildHolesByWall,
+  buildObjectHoles,
   closestPointOnSegment,
 } from '@/lib/room/segments';
 import type { SemanticTree } from '@/lib/room/semantic_tree';
@@ -96,34 +96,48 @@ const WALK_SPEED = 3.5; // m/s
 let _wallBump: THREE.DataTexture | null = null;
 let _floorBump: THREE.DataTexture | null = null;
 
+// Block-noise: each "cell" is `block` pixels square so the bump features
+// are large enough to be visible at typical view distance instead of
+// averaging out to nothing.
 function makeNoiseDataTexture(
   size: number,
   contrast: number,
-  repeat: [number, number]
+  repeat: [number, number],
+  block: number = 4
 ): THREE.DataTexture {
   const data = new Uint8Array(size * size * 4);
-  for (let i = 0; i < size * size; i++) {
-    const v = 128 + Math.floor((Math.random() - 0.5) * 255 * contrast);
-    data[i * 4] = v;
-    data[i * 4 + 1] = v;
-    data[i * 4 + 2] = v;
-    data[i * 4 + 3] = 255;
+  for (let by = 0; by < size; by += block) {
+    for (let bx = 0; bx < size; bx += block) {
+      const v = 128 + Math.floor((Math.random() - 0.5) * 255 * contrast);
+      for (let dy = 0; dy < block && by + dy < size; dy++) {
+        for (let dx = 0; dx < block && bx + dx < size; dx++) {
+          const i = ((by + dy) * size + (bx + dx)) * 4;
+          data[i] = v;
+          data[i + 1] = v;
+          data[i + 2] = v;
+          data[i + 3] = 255;
+        }
+      }
+    }
   }
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeat[0], repeat[1]);
+  tex.magFilter = THREE.NearestFilter;
   tex.needsUpdate = true;
   return tex;
 }
 
 function getWallBump(): THREE.DataTexture {
-  if (!_wallBump) _wallBump = makeNoiseDataTexture(128, 0.35, [4, 4]);
+  if (!_wallBump) _wallBump = makeNoiseDataTexture(128, 0.7, [2, 2], 4);
   return _wallBump;
 }
 
+// Wood-ish grain: long blocks along Y so the bump reads as horizontal
+// planks/grain when applied to the floor.
 function getFloorBump(): THREE.DataTexture {
-  if (!_floorBump) _floorBump = makeNoiseDataTexture(128, 0.45, [6, 24]);
+  if (!_floorBump) _floorBump = makeNoiseDataTexture(128, 0.8, [2, 8], 8);
   return _floorBump;
 }
 
@@ -206,10 +220,13 @@ export default function ScanCanvas({
     return [0, 0, 0];
   }, [room.floors]);
 
-  const holesByWall = useMemo(
-    () => buildHolesByWall(room.walls, [...room.doors, ...room.windows, ...room.openings]),
-    [room]
-  );
+  const holesByWall = useMemo(() => {
+    const explicit = [...room.doors, ...room.windows, ...room.openings];
+    // Punch synthetic holes for objects that visually clip the wall
+    // they're set against (e.g. a fireplace flush to the wall).
+    const cutThrough = buildObjectHoles(room.objects, room.walls, ['fireplace']);
+    return buildHolesByWall(room.walls, [...explicit, ...cutThrough]);
+  }, [room]);
 
   const orphans = useMemo(() => {
     return [...room.doors, ...room.windows, ...room.openings].filter(
@@ -421,12 +438,12 @@ export default function ScanCanvas({
       >
         <CameraGrabber refOut={cameraRef} />
         {viewMode === 'wireframe' && <color attach="background" args={['#dad3c5']} />}
-        <ambientLight intensity={0.4} />
-        <hemisphereLight color="#fff5e8" groundColor="#cfb997" intensity={0.7} />
+        <ambientLight intensity={0.7} />
+        <hemisphereLight color="#dba354" groundColor="#f2bd55" intensity={0.5} />
         <directionalLight
           position={[10, 15, 10]}
-          intensity={1.0}
-          color="#fffbf0"
+          intensity={0.85}
+          color="#ffffff"
           castShadow
         />
         <Grid
@@ -918,22 +935,28 @@ function WallWithHoles({
       shape.holes.push(path);
     }
 
-    return new THREE.ShapeGeometry(shape);
+    // Extrude gives the wall real thickness; centering on Z keeps the
+    // wall straddling its detected surface plane (±depth/2) so neither
+    // face shifts away from the underlying scan geometry.
+    const depth = 0.08;
+    const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+    geo.translate(0, 0, -depth / 2);
+    return geo;
   }, [wall.transform, wall.dimensions, wall.polygonCorners, holes]);
 
   if (viewMode === 'splat') return null; // splats are the visible surface
 
-  const opacity = viewMode === 'hybrid' ? 0.18 : mode === 'walk' ? 1 : 0.55;
+  const opacity = viewMode === 'hybrid' ? 0.18 : mode === 'walk' ? 1 : 0.75;
   const transparent = viewMode === 'hybrid' || mode !== 'walk';
 
   return (
     <mesh position={t.position} quaternion={quat}>
       <primitive object={geometry} attach="geometry" />
       <meshStandardMaterial
-        color="#f1e8d8"
+        color="#f5f1ea"
         roughness={0.95}
         bumpMap={bumpMap}
-        bumpScale={0.02}
+        bumpScale={0.25}
         transparent={transparent}
         opacity={opacity}
         side={THREE.DoubleSide}
@@ -999,17 +1022,18 @@ function FloorMesh({
 
   const geometry = useMemo(() => {
     if (floor.polygonCorners && floor.polygonCorners.length >= 3) {
+      // polygonCorners are local 2D coords on the floor's surface plane
+      // ([x, y, 0]). Build the shape in local XY and let the floor's own
+      // transform/quat tilt it into world horizontal — same convention
+      // walls use. Pre-rotating here would double-rotate against the
+      // transform and stand the floor up vertically.
       const shape = new THREE.Shape(
-        floor.polygonCorners.map(([x, , z]) => new THREE.Vector2(x, z))
+        floor.polygonCorners.map(([x, y]) => new THREE.Vector2(x, y))
       );
-      const geo = new THREE.ShapeGeometry(shape);
-      geo.rotateX(-Math.PI / 2);
-      return geo;
+      return new THREE.ShapeGeometry(shape);
     }
-    const [w, , d] = floor.dimensions;
-    const geo = new THREE.PlaneGeometry(w, d || w);
-    geo.rotateX(-Math.PI / 2);
-    return geo;
+    const [w, h] = floor.dimensions;
+    return new THREE.PlaneGeometry(w, h || w);
   }, [floor.polygonCorners, floor.dimensions]);
 
   if (viewMode === 'splat') return null;
@@ -1035,7 +1059,7 @@ function FloorMesh({
         side={THREE.DoubleSide}
         roughness={0.88}
         bumpMap={bumpMap}
-        bumpScale={0.015}
+        bumpScale={0.2}
         transparent={transparent}
         opacity={opacity}
       />
@@ -1054,7 +1078,6 @@ function ObjectBox({
 }) {
   const t = useMemo(() => decomposeTransform(object.transform), [object.transform]);
   const cat = categoryOf(object.category);
-  const conf = confidenceOf(object.confidence);
   const color = OBJECT_COLORS[cat] ?? '#64748b';
   const [w, h, d] = object.dimensions;
   const quat = new THREE.Quaternion(
@@ -1064,10 +1087,6 @@ function ObjectBox({
     t.quaternion[3]
   );
 
-  // In walk mode the world should feel solid — every detected object is
-  // opaque and you'll bump into it. In orbit mode we keep low-conf
-  // detections ghosted so the designer view doesn't get cluttered.
-  const ghosted = mode !== 'walk' && conf === 'low';
   const splatMode = viewMode === 'splat';
   const hybridMode = viewMode === 'hybrid';
 
@@ -1090,8 +1109,8 @@ function ObjectBox({
     );
   }
 
-  const opacity = hybridMode ? 0.18 : ghosted ? 0.22 : 1;
-  const transparent = hybridMode || ghosted;
+  const opacity = hybridMode ? 0.18 : 1;
+  const transparent = hybridMode;
   const depthWrite = !transparent;
 
   return (
@@ -1112,14 +1131,8 @@ function ObjectBox({
         position={[0, h / 2 + 0.15, 0]}
         style={{ pointerEvents: 'none' }}
       >
-        <div
-          className={
-            'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium ' +
-            (ghosted ? 'bg-white/55 text-neutral-500 italic' : 'bg-neutral-900/80 text-white')
-          }
-        >
+        <div className="whitespace-nowrap rounded bg-neutral-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
           {cat}
-          {ghosted ? ' · low' : ''}
         </div>
       </Html>
     </group>
