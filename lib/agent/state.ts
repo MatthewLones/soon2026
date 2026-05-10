@@ -75,6 +75,7 @@ type AboRow = {
   url?: string;
   price_usd?: number;
   price_as_of?: string;
+  description?: string | null;
 };
 
 const INCH_TO_M = 0.0254;
@@ -148,7 +149,7 @@ function adaptAboRow(row: AboRow): CatalogItem | null {
     weight_kg: row.weight ? round2(row.weight.value * LB_TO_KG) : undefined,
     price_usd: row.price_usd,
     price_as_of: row.price_as_of,
-    description: row.name, // ABO doesn't ship descriptions; fall back to name
+    description: row.description?.trim() || row.name,
     model_path: modelPath,
     thumbnail_path: row.main_image_id
       ? `https://images-na.ssl-images-amazon.com/images/I/${encodeURIComponent(row.main_image_id)}.jpg`

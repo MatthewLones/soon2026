@@ -37,7 +37,8 @@ import {
   addWallAssignment,
   removeAssignment,
 } from './design';
-import { searchCatalog } from './catalog';
+import { searchCatalog, searchCatalogSemantic } from './catalog';
+import { embedQuery, loadCatalogEmbeddings } from './embeddings';
 import { findNodes, getCachedTree } from '../room/assign';
 import { TREE_SCHEMA_DOC } from '../room/semantic_tree';
 
@@ -152,8 +153,11 @@ export async function registerTools(): Promise<void> {
     slug: 'SEARCH_FURNITURE',
     name: 'Search furniture catalog',
     description:
-      'Keyword + structured filter over the catalog. Pass any combination of: ' +
-      'query (substring), category, max_price, style_tags (any-of), color, material. Returns up to N items.',
+      'Structured filter over the catalog with optional semantic ranking. Pass any combination of: ' +
+      'query (free text — when set, results are ranked by semantic similarity to the vibe of the ' +
+      'query, e.g. "warm minimalist" matches by feel, not literal words), category, max_price, ' +
+      'style_tags (any-of), color, material. Returns up to N items, each with a `_score` field ' +
+      'when semantic ranking is used (1.0 = perfect match).',
     inputParams: z.object({
       query: z.string().optional(),
       category: z
@@ -168,9 +172,44 @@ export async function registerTools(): Promise<void> {
     }),
     execute: async (input) => {
       const s = getSession();
-      const items = searchCatalog(s.catalog, input as Parameters<typeof searchCatalog>[1]);
+      const filters = input as Parameters<typeof searchCatalog>[1];
+      const trimmedQuery = filters.query?.trim();
+
+      // Try semantic ranking when there's a query and the embeddings file is
+      // available. Any failure (missing key, API error) falls back to keyword
+      // search rather than killing the agent turn.
+      if (trimmedQuery) {
+        const embeddings = loadCatalogEmbeddings();
+        if (embeddings.size > 0) {
+          try {
+            const queryVec = await embedQuery(trimmedQuery);
+            const items = searchCatalogSemantic(s.catalog, filters, queryVec, embeddings);
+            return ok({
+              count: items.length,
+              ranking: 'semantic',
+              items: items.map((i) => ({
+                id: i.id,
+                name: i.name,
+                brand: i.brand,
+                category: i.category,
+                style_tags: i.style_tags,
+                color: i.color,
+                dim: [i.dimensions.w, i.dimensions.d, i.dimensions.h],
+                price_usd: i.price_usd,
+                description: i.description,
+                _score: i._score,
+              })),
+            });
+          } catch (err) {
+            console.warn('[SEARCH_FURNITURE] semantic ranking failed, falling back to keyword:', err);
+          }
+        }
+      }
+
+      const items = searchCatalog(s.catalog, filters);
       return ok({
         count: items.length,
+        ranking: 'keyword',
         items: items.map((i) => ({
           id: i.id,
           name: i.name,
