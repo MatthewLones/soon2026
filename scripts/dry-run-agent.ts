@@ -26,12 +26,14 @@ async function main() {
   const s = getSession();
   console.log(`Loaded room "${s.room.id}" (${s.room.walls.length} walls), catalog ${s.catalog.length} items.\n`);
 
-  const counts = {
+  const counts: Record<SseEvent['type'], number> = {
     tool_call: 0,
     tool_result: 0,
     thinking: 0,
     assistant_message: 0,
     loop_aborted: 0,
+    placements_cleared: 0,
+    placement_committed: 0,
   };
   const seenTools = new Set<string>();
 

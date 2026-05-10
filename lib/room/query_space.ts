@@ -203,10 +203,11 @@ export function nearWall(
 }
 
 function wallFacingYaw(wallYaw: number, dx: number, dz: number): number {
-  // Yaw such that the placed item's "back" sits against the wall and "front"
-  // (local +Z = (sin yaw, -cos yaw)) faces away. The dx/dz vector points from
-  // the wall toward the candidate (so it's the "into-room" direction).
-  return round4(Math.atan2(dx, -dz));
+  // Three.js Y rotation: local +Z (front) maps to world (sin yaw, cos yaw).
+  // We want front == (dx, dz) (the into-room direction): yaw = atan2(dx, dz).
+  // The earlier formula atan2(dx, -dz) used the flipped math convention and
+  // had the candidate facing the wall on E/W walls.
+  return round4(Math.atan2(dx, dz));
 }
 
 export function facing(

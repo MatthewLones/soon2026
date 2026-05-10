@@ -133,9 +133,15 @@ export function wallAxisOf(
 
   const axis_yaw = Math.atan2(axis.z, axis.x);
   // back-against-wall yaw: the back of the item points outward.
-  // Convention (matches snap.ts): backDir(yaw) = (sin yaw, -cos yaw). Solving
-  // for back == outward gives yaw = atan2(out.x, -out.z).
-  const back_to_wall_yaw = Math.atan2(outward.x, -outward.z);
+  // Three.js Y rotation maps the model's local -Z (back) to world
+  // (-sin yaw, -cos yaw). Solving back == outward gives:
+  //   -sin yaw = out.x  →  sin yaw = -out.x
+  //   -cos yaw = out.z  →  cos yaw = -out.z
+  //   yaw = atan2(-out.x, -out.z)
+  // The earlier formula atan2(out.x, -out.z) used a CCW-in-X-Z math convention
+  // and worked accidentally for N/S walls (out.x=0) but rotated furniture
+  // 180° on E/W walls — front against the wall instead of facing the room.
+  const back_to_wall_yaw = Math.atan2(-outward.x, -outward.z);
 
   return {
     id: wall.id,

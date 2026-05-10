@@ -74,6 +74,83 @@ const fail = (error: string, data: unknown = {}): ToolEnvelope => ({
 const HEADING_VALUES = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
 const SIDE_VALUES = ['front', 'back', 'left', 'right'] as const;
 
+/** Resolve a user-facing wall label ("R", "AA") OR an internal wall id
+ *  ("wall_a114976c") to the canonical internal id. Labels are case-insensitive
+ *  and globally unique within a scan (a wall shared between rooms gets one
+ *  label). Returns { id, label } if found, null otherwise. */
+function resolveWall(input: string): { id: string; label: string } | null {
+  const tree = getCachedTree();
+  const norm = input.trim();
+  // Try id match first (cheap, exact).
+  for (const room of tree.building.rooms) {
+    const byId = room.walls.find((w) => w.id === norm);
+    if (byId) return { id: byId.id, label: byId.label };
+  }
+  // Then label match (case-insensitive). Strip a leading "wall " if the
+  // agent passes "wall R" verbatim.
+  const labelInput = norm.replace(/^wall\s+/i, '').toUpperCase();
+  for (const room of tree.building.rooms) {
+    const byLabel = room.walls.find((w) => w.label.toUpperCase() === labelInput);
+    if (byLabel) return { id: byLabel.id, label: byLabel.label };
+  }
+  return null;
+}
+
+/** Look up a wall's user-facing label from its internal id. Returns null if
+ *  the id isn't in the cached tree. */
+function wallLabelById(wall_id: string): string | null {
+  const tree = getCachedTree();
+  for (const room of tree.building.rooms) {
+    const w = room.walls.find((x) => x.id === wall_id);
+    if (w) return w.label;
+  }
+  return null;
+}
+
+/** Add `wall_label` to a SOLVE_LAYOUT placed/dropped entry when its underlying
+ *  assignment is a wall assignment. Other entries pass through unchanged so
+ *  next-to placements don't gain a meaningless wall_label field. */
+function enrichOutcomeEntry<T extends { assignment_id: string }>(
+  entry: T,
+  assignments: ReadonlyArray<{ id: string; kind: string; wall_id?: string }>
+): T & { wall_label?: string } {
+  const a = assignments.find((x) => x.id === entry.assignment_id);
+  if (!a || a.kind !== 'wall' || !a.wall_id) return entry;
+  const label = wallLabelById(a.wall_id);
+  return label ? { ...entry, wall_label: label } : entry;
+}
+
+/** Hard cap: at most ONE bed in the design at a time. Counts (a) any kept
+ *  bed already detected in the room, (b) any bed currently placed (drag or
+ *  prior solve), and (c) any bed already queued in the design intent. The
+ *  rule fires at ADD_TO_WALL / ADD_NEXT_TO time so the agent gets immediate
+ *  feedback to REMOVE the existing bed before re-adding. */
+function findExistingBedReason(newItem: { id: string; category: string }): string | null {
+  if (newItem.category !== 'bed') return null;
+  const s = getSession();
+  // (a) Detected kept beds in the scan.
+  for (const obj of s.room.detected_objects) {
+    if (obj.category === 'bed' && obj.user_decision === 'keep') {
+      return `room already has a kept bed (${obj.id}) — only one bed allowed; user must remove it before adding a new one`;
+    }
+  }
+  // (b) Placed beds (drag or prior solve output).
+  for (const p of s.placements) {
+    const item = s.catalog.find((c) => c.id === p.catalog_item_id);
+    if (item?.category === 'bed') {
+      return `a bed (${item.id}) is already placed — only one bed allowed; remove the existing placement first`;
+    }
+  }
+  // (c) Beds already queued in the design intent.
+  for (const a of s.design.assignments) {
+    const item = s.catalog.find((c) => c.id === a.item_id);
+    if (item?.category === 'bed') {
+      return `bed ${item.id} is already in the design (assignment ${a.id}) — only one bed allowed; REMOVE_FROM_DESIGN before adding another`;
+    }
+  }
+  return null;
+}
+
 export async function registerTools(): Promise<void> {
   if (registered) return;
   const c = getComposio();
@@ -115,8 +192,8 @@ export async function registerTools(): Promise<void> {
       'Returns full details of a single room: walls (each with a letter label A/B/C..., free_spans, ' +
       'features, suggests), kept objects (with free_space_around in local frame), placements, and ' +
       'door/opening ids bordering this room. Use this AFTER LIST_ROOMS to drill into the room you ' +
-      'want to design. The wall.label is what the user calls walls in chat ("put a sofa on wall A"); ' +
-      'translate those to wall.id when calling ADD_TO_WALL.',
+      'want to design. Pass the wall.label directly to ADD_TO_WALL ({ item_id, wall: "A" }) — no ' +
+      'id translation needed.',
     inputParams: z.object({ room_id: z.string() }),
     execute: async (input) => {
       const tree = getCachedTree();
@@ -245,17 +322,30 @@ export async function registerTools(): Promise<void> {
     description:
       'Record an intent to place an item back-to-wall. NOTHING IS PLACED YET — call SOLVE_LAYOUT to ' +
       'realize. The optimizer picks the exact position (centered on the wall by default), the yaw ' +
-      '(back-to-wall, with anchor_side overrides), and the wall offset. Returns the new assignment_id.',
+      '(back-to-wall, with anchor_side overrides), and the wall offset. Pass `wall` as the user-facing ' +
+      'letter label ("R", "AA") that you see in INSPECT_ROOM / what the user says in chat — no need ' +
+      'to translate to an internal id. Returns assignment_id, wall_id (internal), and wall_label.',
     inputParams: z.object({
       item_id: z.string(),
-      wall_id: z.string(),
+      wall: z.string().describe('User-facing wall label like "R" (preferred) or internal wall id.'),
     }),
     execute: async (input) => {
       const s = getSession();
-      const i = input as { item_id: string; wall_id: string };
-      if (!findCatalogItem(i.item_id)) return fail(`item_id ${i.item_id} not in catalog`);
-      const a = addWallAssignment(s.design, i);
-      return ok({ assignment_id: a.id, kind: a.kind, item_id: a.item_id, wall_id: a.wall_id });
+      const i = input as { item_id: string; wall: string };
+      const item = findCatalogItem(i.item_id);
+      if (!item) return fail(`item_id ${i.item_id} not in catalog`);
+      const bedReason = findExistingBedReason(item);
+      if (bedReason) return fail(bedReason);
+      const resolved = resolveWall(i.wall);
+      if (!resolved) return fail(`wall ${i.wall} not found — use a label from INSPECT_ROOM (e.g. "A", "R")`);
+      const a = addWallAssignment(s.design, { item_id: i.item_id, wall_id: resolved.id });
+      return ok({
+        assignment_id: a.id,
+        kind: a.kind,
+        item_id: a.item_id,
+        wall_id: a.wall_id,
+        wall_label: resolved.label,
+      });
     },
   });
 
@@ -277,7 +367,10 @@ export async function registerTools(): Promise<void> {
     execute: async (input) => {
       const s = getSession();
       const i = input as Parameters<typeof addNextToAssignment>[1];
-      if (!findCatalogItem(i.item_id)) return fail(`item_id ${i.item_id} not in catalog`);
+      const item = findCatalogItem(i.item_id);
+      if (!item) return fail(`item_id ${i.item_id} not in catalog`);
+      const bedReason = findExistingBedReason(item);
+      if (bedReason) return fail(bedReason);
       const a = addNextToAssignment(s.design, i);
       return ok({
         assignment_id: a.id,
@@ -310,14 +403,24 @@ export async function registerTools(): Promise<void> {
     name: 'List the current design and last solve outcome',
     description:
       'Returns the cumulative design (all assignments) plus the last SOLVE_LAYOUT outcome (placed/dropped). ' +
+      'Wall assignments include their user-facing wall_label ("R") alongside the internal wall_id. ' +
       'Use this to verify what intent you have on the books before solving or refining.',
     inputParams: z.object({}),
     execute: async () => {
       const s = getSession();
-      return ok({
-        assignments: s.design.assignments,
-        outcome: s.design.outcome,
-      });
+      const assignments = s.design.assignments.map((a) =>
+        a.kind === 'wall'
+          ? { ...a, wall_label: wallLabelById(a.wall_id) ?? a.wall_id }
+          : a
+      );
+      const outcome = s.design.outcome
+        ? {
+            ...s.design.outcome,
+            placed: s.design.outcome.placed.map((p) => enrichOutcomeEntry(p, s.design.assignments)),
+            dropped: s.design.outcome.dropped.map((p) => enrichOutcomeEntry(p, s.design.assignments)),
+          }
+        : null;
+      return ok({ assignments, outcome });
     },
   });
 
@@ -329,12 +432,17 @@ export async function registerTools(): Promise<void> {
     description:
       'Realize the design: clear prior LLM-placed items, run the optimizer (greedy + repair), commit ' +
       'placements. User-dragged items survive as pinned obstacles. Returns { placed: [...], dropped: [{ ' +
-      'assignment_id, reason, detail, measurements }] }. Read dropped reasons and reissue ADD_/REMOVE_ ' +
-      'before re-solving.',
+      'assignment_id, reason, detail, measurements }] }. Wall-anchored entries include wall_label so you ' +
+      'can narrate "placed sofa on wall R" / "dropped bed on wall R". Read dropped reasons and reissue ' +
+      'ADD_/REMOVE_ before re-solving.',
     inputParams: z.object({}),
     execute: async () => {
       const result = await solveCurrentDesign();
-      return ok(result);
+      const s = getSession();
+      return ok({
+        placed: result.placed.map((p) => enrichOutcomeEntry(p, s.design.assignments)),
+        dropped: result.dropped.map((p) => enrichOutcomeEntry(p, s.design.assignments)),
+      });
     },
   });
 

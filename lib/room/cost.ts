@@ -199,9 +199,10 @@ export function alignmentCost(
 }
 
 function frontEdgePoint(x: number, z: number, yaw: number, d: number): Vec2 {
-  // Front direction = local +Z rotated by yaw. With our convention
-  // (snap.ts: backDir = (sin yaw, -cos yaw)), front is the inverse.
-  const fx = -Math.sin(yaw);
+  // Three.js Y rotation: model's local +Z (front) maps to world (sin yaw, cos yaw).
+  // (Earlier code used (-sin yaw, cos yaw), which assumed the flipped math
+  //  convention and gave wrong front-edge positions on E/W-facing items.)
+  const fx = Math.sin(yaw);
   const fz = Math.cos(yaw);
   return { x: x + fx * (d / 2), z: z + fz * (d / 2) };
 }

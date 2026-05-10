@@ -5,6 +5,7 @@ import Image from 'next/image';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { CatalogItem } from '@/lib/agent/catalog';
+import type { Placement } from '@/lib/room/grid';
 import type {
   SemanticRoom,
   WallNode,
@@ -12,11 +13,12 @@ import type {
 } from '@/lib/room/semantic_tree';
 import type { AgentContext } from './scan-layout';
 
-type Tab = 'chat' | 'catalog' | 'prompt';
+type Tab = 'chat' | 'catalog' | 'cart' | 'prompt';
 
 const TAB_LABEL: Record<Tab, string> = {
   chat: 'chat',
   catalog: 'catalog',
+  cart: 'cart',
   prompt: 'system prompt',
 };
 
@@ -28,6 +30,13 @@ export type ChatEvent =
   | { type: 'assistant_message'; text: string; t: number }
   | { type: 'loop_aborted'; reason: string; t: number }
   | { type: 'error'; message: string; t?: number };
+
+/** Streaming-placement SSE events. Rendered in the 3D canvas (overlay), not
+ *  in the chat transcript. The layout owns the overlay state and exposes a
+ *  handler so ChatTab can forward these as they arrive. */
+export type StreamEvent =
+  | { type: 'placements_cleared'; t: number }
+  | { type: 'placement_committed'; placement: Placement; index: number; t: number };
 
 export type ModelChoice = 'sonnet' | 'opus';
 
@@ -63,6 +72,9 @@ export default function AgentPanel({
   setChatState,
   rolePromptDraft,
   setRolePromptDraft,
+  selectedCatalogItemId,
+  onSelectCatalogItem,
+  onStreamEvent,
 }: {
   ctx: AgentContext | null;
   onRefresh: () => void;
@@ -72,6 +84,9 @@ export default function AgentPanel({
   setChatState: Dispatch<SetStateAction<ChatState>>;
   rolePromptDraft: string;
   setRolePromptDraft: (v: string) => void;
+  selectedCatalogItemId: string | null;
+  onSelectCatalogItem: (id: string | null) => void;
+  onStreamEvent?: (ev: StreamEvent) => void;
 }) {
   const [tab, setTab] = useState<Tab>('chat');
 
@@ -83,7 +98,7 @@ export default function AgentPanel({
   return (
     <aside className="flex w-[440px] shrink-0 flex-col border-l border-neutral-300 bg-white text-neutral-900">
       <div className="flex border-b border-neutral-200 bg-neutral-50/80">
-        {(['chat', 'catalog', 'prompt'] as Tab[]).map((t) => (
+        {(['chat', 'cart', 'catalog', 'prompt'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -106,6 +121,7 @@ export default function AgentPanel({
             onTurnComplete={onRefresh}
             chatState={chatState}
             setChatState={setChatState}
+            onStreamEvent={onStreamEvent}
           />
         )}
         {tab === 'catalog' && (
@@ -113,6 +129,14 @@ export default function AgentPanel({
             catalog={ctx?.catalog ?? []}
             onDragStart={onCatalogDragStart}
             onDragEnd={onCatalogDragEnd}
+          />
+        )}
+        {tab === 'cart' && (
+          <CartTab
+            placements={ctx?.placements ?? []}
+            catalog={ctx?.catalog ?? []}
+            selectedCatalogItemId={selectedCatalogItemId}
+            onSelect={onSelectCatalogItem}
           />
         )}
         {tab === 'prompt' && (
@@ -130,11 +154,13 @@ function ChatTab({
   onTurnComplete,
   chatState,
   setChatState,
+  onStreamEvent,
 }: {
   rolePromptOverride?: string;
   onTurnComplete: () => void;
   chatState: ChatState;
   setChatState: Dispatch<SetStateAction<ChatState>>;
+  onStreamEvent?: (ev: StreamEvent) => void;
 }) {
   const { input, events, streaming, model, thinkingOn, thinkingBudget, maxToolIterations } =
     chatState;
@@ -199,10 +225,16 @@ function ChatTab({
           const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
           if (!dataLine) continue;
           try {
-            const parsed = JSON.parse(dataLine.slice(6)) as ChatEvent;
+            const parsed = JSON.parse(dataLine.slice(6)) as ChatEvent | StreamEvent;
             frameCount++;
             console.log('[ChatTab] SSE frame', frameCount, '→', parsed.type, 'name' in parsed ? (parsed as { name: string }).name : '');
-            pushEvent(parsed);
+            // Streaming-placement events feed the 3D canvas overlay, not the
+            // chat transcript. Everything else is a chat-relevant event.
+            if (parsed.type === 'placements_cleared' || parsed.type === 'placement_committed') {
+              onStreamEvent?.(parsed);
+            } else {
+              pushEvent(parsed);
+            }
           } catch (err) {
             console.error('[ChatTab] bad SSE frame', frame, err);
             pushEvent({ type: 'error', message: `Bad SSE frame: ${frame.slice(0, 200)}` });
@@ -662,6 +694,208 @@ function buildSubtitle(item: CatalogItem): string {
   const { w, d, h } = item.dimensions;
   parts.push(`${w} × ${d} × ${h} m`);
   return parts.join(' · ');
+}
+
+// -------------------------------- Cart -------------------------------
+
+/**
+ * Selection-synced cart, grouped by catalog item. Four chairs of the same
+ * product collapse into one "4× Chair" row. Selection is at the catalog
+ * level: clicking a row highlights every instance of that product in 3D,
+ * and clicking any instance in 3D highlights the matching row here.
+ *
+ * Footer totals known prices (qty × unit) — items without `price_usd`
+ * (vendor uploads, marketplace imports without scraped pricing) are
+ * flagged but excluded from the sum.
+ */
+type CartGroup = {
+  catalogItemId: string;
+  item: CatalogItem | null;
+  qty: number;
+  manualCount: number;
+};
+
+function CartTab({
+  placements,
+  catalog,
+  selectedCatalogItemId,
+  onSelect,
+}: {
+  placements: Placement[];
+  catalog: CatalogItem[];
+  selectedCatalogItemId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  const rowRefs = useRef(new Map<string, HTMLDivElement | null>());
+
+  // Group placements by catalog_item_id. Insertion order = first-seen
+  // order in the placements array, which is stable across solves.
+  const groups = useMemo<CartGroup[]>(() => {
+    const map = new Map<string, CartGroup>();
+    for (const p of placements) {
+      const cid = p.catalog_item_id;
+      let g = map.get(cid);
+      if (!g) {
+        g = {
+          catalogItemId: cid,
+          item: catalog.find((c) => c.id === cid) ?? null,
+          qty: 0,
+          manualCount: 0,
+        };
+        map.set(cid, g);
+      }
+      g.qty += 1;
+      if (p.source === 'drag') g.manualCount += 1;
+    }
+    return Array.from(map.values());
+  }, [placements, catalog]);
+
+  // When selection changes from outside (3D click), scroll the matching
+  // group row into view.
+  useEffect(() => {
+    if (!selectedCatalogItemId) return;
+    const el = rowRefs.current.get(selectedCatalogItemId);
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selectedCatalogItemId]);
+
+  const knownPriceTotal = groups.reduce(
+    (acc, g) => acc + (g.item?.price_usd ?? 0) * g.qty,
+    0
+  );
+  const unpricedGroups = groups.filter((g) => g.item?.price_usd === undefined).length;
+  const totalQty = groups.reduce((acc, g) => acc + g.qty, 0);
+
+  if (placements.length === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-xs text-neutral-500">
+        <div className="text-sm font-medium text-neutral-700">Cart is empty</div>
+        <div>Items the agent places — or that you drag in from the catalog — will show up here.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3">
+        {groups.map(({ catalogItemId, item, qty, manualCount }) => {
+          const isSelected = selectedCatalogItemId === catalogItemId;
+          const name = item?.name ?? catalogItemId;
+          const subtitle = item ? `${item.brand} · ${prettyCategory(item.category)}` : 'unknown item';
+          const unitPrice = item?.price_usd;
+          const lineTotal = unitPrice !== undefined ? unitPrice * qty : undefined;
+          const priceLabel = lineTotal !== undefined ? `$${lineTotal.toFixed(2)}` : '—';
+          const unitLabel =
+            qty > 1 && unitPrice !== undefined ? `$${unitPrice.toFixed(2)} ea` : null;
+          // ABO items live on Amazon — give the user a one-click path to buy.
+          // Vendor uploads / marketplace items don't have a public URL yet, so
+          // the link only renders for source=='abo' with an asin.
+          const buyUrl =
+            item?.asin && item.source === 'abo'
+              ? `https://www.amazon.com/dp/${item.asin}`
+              : null;
+          // Row uses div+role=button (not <button>) because we nest an <a> for
+          // the buy link, and <a> inside <button> is invalid HTML.
+          return (
+            <div
+              key={catalogItemId}
+              ref={(el) => {
+                rowRefs.current.set(catalogItemId, el);
+              }}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(isSelected ? null : catalogItemId)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(isSelected ? null : catalogItemId);
+                }
+              }}
+              className={
+                'flex w-full cursor-pointer items-center gap-3 rounded-md border p-2 text-left transition ' +
+                (isSelected
+                  ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-300'
+                  : 'border-neutral-200 bg-white hover:bg-neutral-50')
+              }
+            >
+              <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded bg-neutral-100">
+                {item?.thumbnail_path ? (
+                  <Image
+                    src={item.thumbnail_path}
+                    alt={name}
+                    fill
+                    sizes="48px"
+                    className="object-contain"
+                    unoptimized
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-[9px] text-neutral-400">
+                    no img
+                  </div>
+                )}
+                {qty > 1 && (
+                  <div className="absolute right-0 top-0 rounded-bl bg-neutral-900/85 px-1 py-0.5 text-[9px] font-bold leading-none text-white">
+                    {qty}×
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12px] font-medium text-neutral-900">
+                  {qty > 1 && <span className="text-neutral-500">{qty}× </span>}
+                  {name}
+                </div>
+                <div className="truncate text-[10px] text-neutral-500">{subtitle}</div>
+                {buyUrl && (
+                  <a
+                    href={buyUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="mt-0.5 inline-block text-[10px] text-blue-600 hover:underline"
+                  >
+                    Buy on Amazon ↗
+                  </a>
+                )}
+              </div>
+              <div className="shrink-0 text-right">
+                <div className="text-[12px] font-semibold text-neutral-900">{priceLabel}</div>
+                {unitLabel && (
+                  <div className="text-[9px] text-neutral-500">{unitLabel}</div>
+                )}
+                {manualCount > 0 && (
+                  <div className="text-[9px] uppercase tracking-wider text-neutral-400">
+                    {manualCount === qty ? 'manual' : `${manualCount} manual`}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Footer: thin meta line on top, large prominent total on the very
+          bottom row so the dollar number is the last thing the eye lands on. */}
+      <div className="border-t border-neutral-200 bg-white">
+        <div className="flex items-center justify-between px-3 pt-2 text-[10px] text-neutral-500">
+          <span>
+            {totalQty} item{totalQty === 1 ? '' : 's'}
+            {groups.length !== totalQty && ` · ${groups.length} unique`}
+          </span>
+          {unpricedGroups > 0 && (
+            <span>
+              {unpricedGroups} without listed price
+            </span>
+          )}
+        </div>
+        <div className="flex items-baseline justify-between border-t border-neutral-100 bg-neutral-50 px-3 py-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-neutral-700">
+            Total
+          </span>
+          <span className="text-lg font-bold text-neutral-900">
+            ${knownPriceTotal.toFixed(2)}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // --------------------------- System prompt ---------------------------

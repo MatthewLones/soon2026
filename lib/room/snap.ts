@@ -77,13 +77,6 @@ function angleDiff(a: number, b: number): number {
   return Math.abs(normalizeAngle(a - b));
 }
 
-/** Rotate a 2D vector. */
-function rot(v: Vec2, rad: number): Vec2 {
-  const c = Math.cos(rad);
-  const s = Math.sin(rad);
-  return { x: c * v.x - s * v.z, z: s * v.x + c * v.z };
-}
-
 export type SnapOptions = {
   /** When true, skip cardinal/wall yaw snapping. Used by the assignment engine
    *  when it has already computed a deliberate yaw (e.g. perpendicular to a
@@ -112,10 +105,11 @@ export function snap(
     const candidates: number[] = [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI];
     // Add wall-aligned yaws (perpendicular to each wall — i.e. furniture sits
     // back-against-wall, facing into room).
-    // Convention: backDir(yaw) = rot((0,-1), yaw) = (sin yaw, -cos yaw).
-    // We want backDir = outward, so yaw = atan2(out.x, -out.z).
+    // Three.js Y rotation maps model local -Z (back) to world
+    // (-sin yaw, -cos yaw). For back == outward: yaw = atan2(-out.x, -out.z).
+    // Same convention as wall_geometry.ts back_to_wall_yaw — keep them in sync.
     for (const wl of walls) {
-      const desiredYaw = Math.atan2(wl.outward.x, -wl.outward.z);
+      const desiredYaw = Math.atan2(-wl.outward.x, -wl.outward.z);
       candidates.push(normalizeAngle(desiredYaw));
     }
     let bestYaw = yaw;
@@ -155,7 +149,8 @@ export function snap(
     // wall's outward normal — otherwise the agent placed the item at an
     // intentional angle and we should leave it alone.
     const out = nearest.wall.outward;
-    const backDir = rot({ x: 0, z: -1 }, yaw);
+    // Three.js back direction at this yaw (see desiredYaw derivation above).
+    const backDir = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
     const alignDot = backDir.x * out.x + backDir.z * out.z;
     if (alignDot > 0.9) {
       const halfDepth = input.footprint.d / 2;

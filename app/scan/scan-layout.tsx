@@ -10,7 +10,7 @@ import type { Placement } from '@/lib/room/grid';
 import type { SemanticTree } from '@/lib/room/semantic_tree';
 import { isCanvasFocused } from '@/lib/canvas-focus';
 import ScanCanvas from './scan-canvas';
-import AgentPanel, { type ChatState, INITIAL_CHAT_STATE } from './panel';
+import AgentPanel, { type ChatState, type StreamEvent, INITIAL_CHAT_STATE } from './panel';
 import TreeDebugPanel from './tree-debug-panel';
 import StartPartyButton from './start-party';
 
@@ -89,6 +89,24 @@ export default function ScanLayout({
    *  destroy the user's draft, history, model choice, etc. */
   const [chatState, setChatState] = useState<ChatState>(INITIAL_CHAT_STATE);
   const [rolePromptDraft, setRolePromptDraft] = useState('');
+  /** Cross-pane selection at the *catalog-item* level so identical
+   *  duplicates (4 of the same chair) collapse into one cart row + glow as
+   *  a group in 3D. Clicking any chair in 3D selects every chair of the
+   *  same product; clicking the cart row does the same in reverse. */
+  const [selectedCatalogItemId, setSelectedCatalogItemId] = useState<string | null>(null);
+  /** Per-turn overlay populated by SSE `placement_committed` events so the
+   *  canvas can pop new furniture in one piece at a time, ahead of the
+   *  post-turn /api/agent-context refresh. Cleared once the canonical state
+   *  has been re-fetched (refresh() below). */
+  const [streamingPlacements, setStreamingPlacements] = useState<Placement[]>([]);
+
+  const handleStreamEvent = useCallback((ev: StreamEvent) => {
+    if (ev.type === 'placements_cleared') {
+      setStreamingPlacements([]);
+    } else if (ev.type === 'placement_committed') {
+      setStreamingPlacements((prev) => [...prev, ev.placement]);
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -96,6 +114,10 @@ export default function ScanLayout({
       setCtx((await r.json()) as AgentContext);
     } catch (e) {
       console.error('agent-context fetch failed', e);
+    } finally {
+      // Canonical state is now in ctx — drop the per-turn overlay so we don't
+      // double-render. Safe even if no streaming happened (no-op clear).
+      setStreamingPlacements([]);
     }
   }, []);
 
@@ -121,6 +143,19 @@ export default function ScanLayout({
         setVerboseMode((v) => !v);
         setLabelsMode(false);
       }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Escape clears the current selection. Skip when typing in chat so it
+  // doesn't fight with the IME / native textarea Escape behavior.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      const a = document.activeElement as HTMLElement | null;
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
+      setSelectedCatalogItemId(null);
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -176,6 +211,18 @@ export default function ScanLayout({
     setSeedWorld(point);
   }, []);
 
+  /** Render-time placement merge. The streaming overlay carries newly-solved
+   *  pieces that the canvas should pop in NOW; the canonical ctx.placements
+   *  may still be the pre-solve snapshot until refresh() resolves. Overlay
+   *  wins on id collisions so we never render a stale copy alongside the
+   *  fresh one. */
+  const mergedPlacements: Placement[] = (() => {
+    if (streamingPlacements.length === 0) return ctx?.placements ?? [];
+    const overlayIds = new Set(streamingPlacements.map((p) => p.id));
+    const base = (ctx?.placements ?? []).filter((p) => !overlayIds.has(p.id));
+    return [...base, ...streamingPlacements];
+  })();
+
   return (
     <main className="flex h-screen w-screen overflow-hidden bg-[#dad3c5]">
       <div className="relative min-w-0 flex-1">
@@ -183,7 +230,7 @@ export default function ScanLayout({
           room={room}
           splatUrl={splatUrl}
           splatAlignment={splatAlignment}
-          placements={ctx?.placements ?? []}
+          placements={mergedPlacements}
           catalog={ctx?.catalog ?? []}
           originOffset={ctx?.originOffset}
           onFloorClick={onFloorClick}
@@ -195,6 +242,8 @@ export default function ScanLayout({
           onNodeHover={verboseMode ? setHoveredNodeId : undefined}
           labelsMode={labelsMode}
           verboseMode={verboseMode}
+          selectedCatalogItemId={selectedCatalogItemId}
+          onSelectCatalogItem={setSelectedCatalogItemId}
         />
         {/* Mutually exclusive toggles: turning one on forces the other off.
             Both can still be off. Labels = clean letters for chat (default UX);
@@ -296,6 +345,9 @@ export default function ScanLayout({
           setChatState={setChatState}
           rolePromptDraft={rolePromptDraft}
           setRolePromptDraft={setRolePromptDraft}
+          selectedCatalogItemId={selectedCatalogItemId}
+          onSelectCatalogItem={setSelectedCatalogItemId}
+          onStreamEvent={handleStreamEvent}
         />
       ))}
       {resetConfirm && mounted && createPortal(

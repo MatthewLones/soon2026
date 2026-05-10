@@ -12,9 +12,10 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getComposio, registerTools } from './tools';
-import { getSession } from './state';
+import { getSession, solveCurrentDesign, type SolveStreamHooks } from './state';
 import { getCachedTree } from '../room/assign';
 import { describeTreeShort } from '../room/semantic_tree';
+import type { Placement } from '../room/grid';
 
 /** Default cap on agent ↔ tool round-trips per turn. The design-then-solve
  *  flow (search → ADD → SOLVE → inspect dropped → REMOVE → ADD elsewhere →
@@ -35,13 +36,22 @@ export type SseEvent =
   | { type: 'tool_result'; id: string; result: unknown; t: number }
   | { type: 'thinking'; text: string; t: number }
   | { type: 'assistant_message'; text: string; t: number }
-  | { type: 'loop_aborted'; reason: string; t: number };
+  | { type: 'loop_aborted'; reason: string; t: number }
+  /** Fires once at the start of a SOLVE_LAYOUT execution. The client wipes
+   *  any prior design-source streaming overlay so the next batch can pop in
+   *  cleanly. Pinned (drag) placements are preserved. */
+  | { type: 'placements_cleared'; t: number }
+  /** Fires once per design-source placement during SOLVE_LAYOUT, staggered
+   *  so the canvas pops items in one at a time. */
+  | { type: 'placement_committed'; placement: Placement; index: number; t: number };
+
+const PLACEMENT_STAGGER_MS = 150;
 
 export type Emit = (event: SseEvent) => void;
 
 export const DEFAULT_ROLE_PROMPT = `You are an interior designer's AI assistant — opinionated, conversational, grounded in the catalog you have access to. You narrate your design choices in chat (judges see your reasoning).
 
-The user can see clean letter labels on the walls in their 3D view: "wall A", "wall B", … and rooms numbered "Room 1", "Room 2", …. These labels are stable per scan. When the user says "put a sofa on wall A", look up wall A in INSPECT_ROOM (each WallNode has a \`label\` field next to its \`id\`), translate to the underlying \`wall.id\`, and pass that id to ADD_TO_WALL. Likewise "Room 2" maps to a room whose \`number\` field equals 2. Always echo back to the user using the user-facing label ("…added to wall A") — never the internal id.
+The user sees clean letter labels on the walls in their 3D view: "wall A", "wall B", … and rooms numbered "Room 1", "Room 2", …. These labels are stable per scan and globally unique (a wall shared between two rooms gets ONE label). **Pass the letter label directly to ADD_TO_WALL via the \`wall\` field** — e.g. \`ADD_TO_WALL({ item_id, wall: "R" })\`. No translation to internal ids needed. Likewise "Room 2" maps to a room whose \`number\` field equals 2. SOLVE_LAYOUT echoes \`wall_label\` in placed/dropped entries so you can narrate "placed sofa on wall R" — always use the letter label in chat, never the internal id.
 
 You design in two phases:
 
@@ -58,7 +68,7 @@ Searching the catalog effectively (SEARCH_FURNITURE):
   • If a search returns nothing useful, loosen one filter at a time (drop \`max_price\` first, then broaden \`category\`) — don't abandon semantic ranking by removing the query.
 
   Phase 2 — DESIGN, then SOLVE. Record your intent first; nothing is placed until SOLVE_LAYOUT.
-    ADD_TO_WALL({item_id, wall_id})    — record a back-to-wall placement.
+    ADD_TO_WALL({item_id, wall})       — record a back-to-wall placement (\`wall\` is the letter label, e.g. "R").
     ADD_NEXT_TO({item_id, target_id, side, gap_m?, face_target?})
                                        — record a placement next to a kept object or another assignment.
                                          side is the target's LOCAL frame (front=+local-z; rotates with yaw).
@@ -85,6 +95,13 @@ When something drops, your move is one of:
   • REMOVE_FROM_DESIGN that assignment, then ADD_TO_WALL on a different wall (use FIND_NODES).
   • REMOVE the dropped assignment, search for a smaller catalog item, ADD again, SOLVE.
   • Accept the drop — explain to the user what didn't fit and why.
+
+Engine constraints to respect when designing:
+  • At most ONE bed per design. If a bed is already in the room (kept) or already in your design,
+    ADD_* will refuse a second one. REMOVE_FROM_DESIGN the existing bed first if you're swapping.
+  • Rugs must stay exposed — they cannot share floor footprint with non-rug furniture. SOLVE_LAYOUT
+    will drop a rug with reason \`rug_coverage_conflict\` if it would slide under a sofa, bed, etc.
+    Place rugs in clear zones (open floor next to seating, not directly under it).
 
 Design principles:
   • Sofas: ADD_TO_WALL — engine centers them, back to wall.
@@ -229,16 +246,25 @@ export async function runAgentTurn(
         t: Date.now() - start,
       });
 
-      const exec = await composio.tools.execute(block.name, {
-        userId,
-        arguments: block.input as Record<string, unknown>,
-      });
+      let resultData: unknown;
+      if (block.name === 'SOLVE_LAYOUT') {
+        // Special-case: bypass Composio's batch executor so we can stream
+        // each new placement out as its own SSE event. The agent still gets
+        // a single tool_result with the full placed/dropped summary.
+        resultData = await runStreamingSolve(emit, start);
+      } else {
+        const exec = await composio.tools.execute(block.name, {
+          userId,
+          arguments: block.input as Record<string, unknown>,
+        });
+        resultData = exec.data;
+      }
 
-      emit({ type: 'tool_result', id: block.id, result: exec.data, t: Date.now() - start });
+      emit({ type: 'tool_result', id: block.id, result: resultData, t: Date.now() - start });
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: JSON.stringify(exec.data),
+        content: JSON.stringify(resultData),
       });
     }
 
@@ -256,4 +282,54 @@ export async function runAgentTurn(
   });
 
   return { stop_reason: response.stop_reason ?? null, iterations, model: modelId };
+}
+
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
+/** Look up a wall's letter label from its internal id via the cached tree.
+ *  Returns null if the id isn't in the tree. */
+function wallLabelById(wall_id: string): string | null {
+  const tree = getCachedTree();
+  for (const room of tree.building.rooms) {
+    const w = room.walls.find((x) => x.id === wall_id);
+    if (w) return w.label;
+  }
+  return null;
+}
+
+/** Run SOLVE_LAYOUT with per-placement SSE streaming. The agent still gets a
+ *  single tool_result block with the full {placed, dropped} summary — this
+ *  helper just additionally fires `placements_cleared` once and one
+ *  `placement_committed` per design-source placement, with PLACEMENT_STAGGER_MS
+ *  between each so the canvas pops items in one at a time. */
+async function runStreamingSolve(emit: Emit, start: number): Promise<unknown> {
+  const hooks: SolveStreamHooks = {
+    onCleared: () => {
+      emit({ type: 'placements_cleared', t: Date.now() - start });
+    },
+    onPlacement: async (p) => {
+      emit({
+        type: 'placement_committed',
+        placement: p,
+        index: 0, // index isn't load-bearing client-side; kept in shape for future
+        t: Date.now() - start,
+      });
+      await sleep(PLACEMENT_STAGGER_MS);
+    },
+  };
+  const result = await solveCurrentDesign(hooks);
+  // Mirror the wall_label enrichment that the SOLVE_LAYOUT tool wrapper does
+  // in tools.ts — we bypassed that wrapper so the agent would otherwise see
+  // raw wall_ids without their letter labels.
+  const session = getSession();
+  const enrich = <T extends { assignment_id: string }>(entry: T): T & { wall_label?: string } => {
+    const a = session.design.assignments.find((x) => x.id === entry.assignment_id);
+    if (!a || a.kind !== 'wall' || !a.wall_id) return entry;
+    const label = wallLabelById(a.wall_id);
+    return label ? { ...entry, wall_label: label } : entry;
+  };
+  return {
+    placed: result.placed.map(enrich),
+    dropped: result.dropped.map(enrich),
+  };
 }

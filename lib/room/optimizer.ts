@@ -22,7 +22,7 @@
  */
 
 import type { Room } from './normalize';
-import { type Placement } from './grid';
+import { type Placement, obbCorners, pointInOBB } from './grid';
 import { validatePlacement, type PlaceResult } from './place';
 import { nextPlacementId } from './placement-id';
 import { type SemanticTree, type WallNode, type ObjectNode } from './semantic_tree';
@@ -93,6 +93,53 @@ function findObjectNode(tree: SemanticTree, target_id: string): ObjectNode | nul
 
 function categoryFacesTarget(category: CatalogItem['category']): boolean {
   return category === 'seating';
+}
+
+/** Quick OBB-vs-OBB overlap test using corner-containment. Sufficient for the
+ *  furniture-on-rug check because both shapes are roughly axis-aligned with
+ *  the wall they live on; the pathological "+" overlap (no corners inside
+ *  either box) doesn't arise for rectangular furniture. */
+function obbsOverlap(
+  a: { x: number; z: number; w: number; d: number; yaw: number },
+  b: { x: number; z: number; w: number; d: number; yaw: number }
+): boolean {
+  const aCorners = obbCorners({ x: a.x, z: a.z }, a.w, a.d, a.yaw);
+  const bCorners = obbCorners({ x: b.x, z: b.z }, b.w, b.d, b.yaw);
+  for (const c of aCorners) if (pointInOBB(c, { x: b.x, z: b.z }, b.w, b.d, b.yaw)) return true;
+  for (const c of bCorners) if (pointInOBB(c, { x: a.x, z: a.z }, a.w, a.d, a.yaw)) return true;
+  return false;
+}
+
+/** Carpets-must-stay-exposed rule: rugs cannot share floor footprint with
+ *  any non-rug placement (and vice versa). Runs before the optimizer commits
+ *  a candidate so we get a specific failure reason instead of a generic
+ *  collision. Returns the blocker id when the rule fires, or null. */
+function findRugCoverageConflict(
+  candidate: { x: number; z: number; w: number; d: number; rotation_y: number },
+  candidateCategory: CatalogItem['category'],
+  others: Placement[],
+  catalogLookup: (id: string) => CatalogItem | undefined
+): string | null {
+  const candidateBox = { ...candidate, yaw: candidate.rotation_y };
+  for (const p of others) {
+    const otherItem = catalogLookup(p.catalog_item_id);
+    if (!otherItem) continue;
+    const candidateIsRug = candidateCategory === 'rug';
+    const otherIsRug = otherItem.category === 'rug';
+    // Only fire on rug ↔ non-rug pairs. Two rugs overlapping is the user's
+    // call (layered rugs are a real design move); non-rug ↔ non-rug is left
+    // to the standard grid collision check.
+    if (candidateIsRug === otherIsRug) continue;
+    const otherBox = {
+      x: p.position.x,
+      z: p.position.z,
+      w: p.dimensions.w,
+      d: p.dimensions.d,
+      yaw: p.rotation_y,
+    };
+    if (obbsOverlap(candidateBox, otherBox)) return p.id;
+  }
+  return null;
 }
 
 // ---------- Step 1: dependency order ----------
@@ -249,18 +296,26 @@ function generateNextToCandidates(
   };
 
   // Yaw: face target if seating, else align with target. The face-target
-  // offset depends on which side the item is on:
-  //   side=front:  +π  (chair on north side, faces south toward table)
-  //   side=back:   0   (chair on south side, faces north toward table)
-  //   side=left:   -π/2 (chair on west side, faces east toward table)
-  //   side=right:  +π/2 (chair on east side, faces west toward table)
+  // offset rotates the chair so its model-front (+local-Z by convention) ends
+  // up pointing at the target's center. With three.js Y-rotation:
+  //   yaw=0       → model front at world +Z
+  //   yaw=π       → model front at world -Z
+  //   yaw=+π/2    → model front at world +X
+  //   yaw=-π/2    → model front at world -X
+  // For a target at origin (yaw=0):
+  //   side=front (chair at +Z): face -Z → yaw=π
+  //   side=back  (chair at -Z): face +Z → yaw=0
+  //   side=right (chair at +X): face -X → yaw=-π/2
+  //   side=left  (chair at -X): face +X → yaw=+π/2
+  // Earlier versions had left/right inverted, which made flanking chairs face
+  // away from the table even though the seats were positioned correctly.
   const inferFace = categoryFacesTarget(item.category);
   const faceTarget = assignment.face_target ?? inferFace;
   const FACE_OFFSETS: Record<Side, number> = {
     front: Math.PI,
     back: 0,
-    left: -Math.PI / 2,
-    right: Math.PI / 2,
+    left: Math.PI / 2,
+    right: -Math.PI / 2,
   };
   const yaw = faceTarget
     ? targetWorld.yaw + FACE_OFFSETS[assignment.side]
@@ -402,7 +457,7 @@ export function solveLayout(input: SolveInput): SolveResult {
       continue;
     }
     const result = tryPlace(a, item, {
-      room, tree, allAssignments: ordered, realized, pinned, wallAxesByRoom, bucketOrder, bucketIndex,
+      room, tree, allAssignments: ordered, realized, pinned, wallAxesByRoom, bucketOrder, bucketIndex, catalogLookup,
     });
     if (result.ok) {
       realized.push(result.placement);
@@ -415,7 +470,7 @@ export function solveLayout(input: SolveInput): SolveResult {
     } else {
       // Repair pass: try shifting the blocker by ±30 cm and re-place.
       const repaired = repairAndRetry(a, item, result.blockerId ?? null, {
-        room, tree, allAssignments: ordered, realized, pinned, wallAxesByRoom, bucketOrder, bucketIndex,
+        room, tree, allAssignments: ordered, realized, pinned, wallAxesByRoom, bucketOrder, bucketIndex, catalogLookup,
       });
       if (repaired.ok) {
         realized.push(repaired.placement);
@@ -456,6 +511,10 @@ type PlaceCtx = {
   wallAxesByRoom: WallAxis[];
   bucketOrder: Map<string, NextToAssignment[]>;
   bucketIndex: Map<string, number>;
+  /** Catalog lookup so the optimizer can apply category-aware rules
+   *  (e.g. rugs must remain visually exposed). Threaded through from
+   *  solveLayout's input. */
+  catalogLookup: (item_id: string) => CatalogItem | undefined;
 };
 
 type TryResult =
@@ -572,6 +631,7 @@ function scoreAndPick(
 
   let best: { c: Candidate; cost: number } | null = null;
   let lastBlockerId: string | null = null;
+  let lastRugBlockerId: string | null = null;
   for (const c of candidates) {
     // Hard infeasibility check via validatePlacement.
     const obstacles = [...ctx.pinned, ...ctx.realized];
@@ -590,6 +650,20 @@ function scoreAndPick(
       }
       continue;
     }
+    // Rugs-must-stay-exposed: reject candidates where the rug would slide
+    // under non-rug furniture (or the non-rug item would land on top of a
+    // rug). This is a stricter rule than the grid collision check, which
+    // can let near-flat rugs squeeze through.
+    const rugBlocker = findRugCoverageConflict(
+      { x: c.x, z: c.z, w: c.w, d: c.d, rotation_y: c.rotation_y },
+      item.category,
+      obstacles,
+      ctx.catalogLookup
+    );
+    if (rugBlocker) {
+      lastRugBlockerId = rugBlocker;
+      continue;
+    }
     const breakdown = scoreCandidate(c, {
       room: ctx.room,
       axisLength: wallAxisLength,
@@ -601,6 +675,17 @@ function scoreAndPick(
     if (!best || breakdown.total < best.cost) best = { c, cost: breakdown.total };
   }
   if (!best) {
+    if (lastRugBlockerId && !lastBlockerId) {
+      return {
+        ok: false,
+        reason: 'rug_coverage_conflict',
+        detail:
+          item.category === 'rug'
+            ? `rug would sit under existing furniture (${lastRugBlockerId}); rugs need to stay exposed`
+            : `placement would cover existing rug (${lastRugBlockerId}); rugs need to stay exposed`,
+        blockerId: lastRugBlockerId,
+      };
+    }
     return {
       ok: false,
       reason: 'collision_with_existing',

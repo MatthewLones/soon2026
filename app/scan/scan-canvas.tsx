@@ -119,6 +119,8 @@ export default function ScanCanvas({
   onNodeHover,
   labelsMode = false,
   verboseMode = false,
+  selectedCatalogItemId = null,
+  onSelectCatalogItem,
 }: {
   room: RoomPlanRaw;
   splatUrl?: string;
@@ -151,6 +153,11 @@ export default function ScanCanvas({
   labelsMode?: boolean;
   /** Show the verbose debug breakdown (compartments, free spans, clearances). */
   verboseMode?: boolean;
+  /** Currently selected catalog-item id (cross-pane sync with cart tab).
+   *  All placements whose `catalog_item_id` matches glow as a group. */
+  selectedCatalogItemId?: string | null;
+  /** Pass to clear (null) or set the selection. */
+  onSelectCatalogItem?: (id: string | null) => void;
 }) {
   const cameraTarget = useMemo<[number, number, number]>(() => {
     if (room.floors[0]) {
@@ -450,6 +457,8 @@ export default function ScanCanvas({
             mode={mode}
             drag={drag}
             setDrag={setDrag}
+            selected={selectedCatalogItemId === p.catalog_item_id}
+            onSelect={onSelectCatalogItem}
             onCommitMove={async (id, fx, fz, ry) => {
               try {
                 const res = (await fetch(`/api/placements/${id}`, {
@@ -680,12 +689,35 @@ function FirstPersonRig({
   startPosition: THREE.Vector3;
 }) {
   const { camera } = useThree();
-  const keys = useRef({ w: false, a: false, s: false, d: false });
+  const keys = useRef({
+    w: false,
+    a: false,
+    s: false,
+    d: false,
+    lookLeft: false,
+    lookRight: false,
+    lookUp: false,
+    lookDown: false,
+  });
   const initialized = useRef(false);
 
   useEffect(() => {
     if (!initialized.current) {
       camera.position.set(startPosition.x, floorY + EYE_HEIGHT, startPosition.z);
+      // FPS-style yaw + pitch needs YXZ order so that mutating rotation.x
+      // (pitch) doesn't drift the yaw axis. PointerLockControls also uses
+      // YXZ internally, so the two stay in sync when the user mixes mouse
+      // and keyboard look.
+      //
+      // The camera is arriving from OrbitControls, whose rotation has all
+      // three euler components populated. Re-interpreting those values
+      // under YXZ would surface a non-zero `z` component as visible head
+      // roll, so we reset cleanly: take the current horizontal facing
+      // direction as yaw, zero out pitch and roll.
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      const yaw = Math.atan2(-dir.x, -dir.z);
+      camera.rotation.set(0, yaw, 0, 'YXZ');
       initialized.current = true;
     }
   }, [camera, startPosition, floorY]);
@@ -696,15 +728,20 @@ function FirstPersonRig({
       KeyA: 'a',
       KeyS: 's',
       KeyD: 'd',
-      ArrowUp: 'w',
-      ArrowLeft: 'a',
-      ArrowDown: 's',
-      ArrowRight: 'd',
+      ArrowLeft: 'lookLeft',
+      ArrowRight: 'lookRight',
+      ArrowUp: 'lookUp',
+      ArrowDown: 'lookDown',
     };
     const down = (e: KeyboardEvent) => {
       if (!isCanvasFocused()) return;
       const k = map[e.code];
-      if (k) keys.current[k] = true;
+      if (k) {
+        keys.current[k] = true;
+        // Arrow keys would otherwise scroll the page. Block once the canvas
+        // owns them.
+        if (e.code.startsWith('Arrow')) e.preventDefault();
+      }
     };
     const up = (e: KeyboardEvent) => {
       const k = map[e.code];
@@ -718,8 +755,30 @@ function FirstPersonRig({
     };
   }, []);
 
+  // Look speeds: ~85°/s yaw and ~70°/s pitch feel responsive without making
+  // it easy to overshoot. Pitch clamped just shy of straight-up/down to
+  // avoid gimbal flip.
+  const YAW_SPEED = 1.5;
+  const PITCH_SPEED = 1.2;
+  const PITCH_CLAMP = Math.PI / 2 - 0.05;
+
   useFrame((_, dt) => {
     const k = keys.current;
+    const ddt = Math.min(dt, 0.1);
+
+    // Apply look rotation every frame so the user can stand still and look
+    // around with just the arrow keys.
+    if (k.lookLeft) camera.rotation.y += YAW_SPEED * ddt;
+    if (k.lookRight) camera.rotation.y -= YAW_SPEED * ddt;
+    if (k.lookUp || k.lookDown) {
+      const dx = (k.lookUp ? 1 : 0) - (k.lookDown ? 1 : 0);
+      camera.rotation.x = THREE.MathUtils.clamp(
+        camera.rotation.x + PITCH_SPEED * ddt * dx,
+        -PITCH_CLAMP,
+        PITCH_CLAMP
+      );
+    }
+
     if (!(k.w || k.a || k.s || k.d)) {
       camera.position.y = floorY + EYE_HEIGHT;
       return;
@@ -1044,6 +1103,8 @@ function PlacementMesh({
   setDrag,
   onCommitMove,
   toFloor,
+  selected,
+  onSelect,
 }: {
   placement: Placement;
   catalog: CatalogItem[];
@@ -1054,6 +1115,8 @@ function PlacementMesh({
   setDrag: (d: DragState | null | ((prev: DragState | null) => DragState | null)) => void;
   onCommitMove: (id: string, fx: number, fz: number, ry: number) => void | Promise<void>;
   toFloor: (worldX: number, worldZ: number) => Vec2;
+  selected?: boolean;
+  onSelect?: (id: string | null) => void;
 }) {
   const item = catalog.find((c) => c.id === placement.catalog_item_id);
   const offsetX = originOffset?.x ?? 0;
@@ -1073,6 +1136,13 @@ function PlacementMesh({
 
   const { w, d, h } = placement.dimensions;
 
+  // Click-vs-drag arbitration: pointerdown stages a drag (so the cursor
+  // tracks the mesh from the first frame), but if the pointer never moves
+  // far enough, pointerup treats it as a click instead and routes to
+  // onSelect. Threshold is in screen pixels — ~5px feels native.
+  const pointerStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const CLICK_THRESHOLD_PX = 5;
+
   // Box fallback for stub items (model_path: "box:WxHxD") or while the GLB
   // suspends. Sized from the placement dimensions, sat on the floor. While
   // dragging, drop opacity hard so the user can still see the floor + other
@@ -1082,7 +1152,9 @@ function PlacementMesh({
       <mesh castShadow={!isDragging}>
         <boxGeometry args={[w, h, d]} />
         <meshStandardMaterial
-          color="#a16207"
+          color={selected ? '#a855f7' : '#a16207'}
+          emissive={selected ? '#7c3aed' : '#000000'}
+          emissiveIntensity={selected ? 0.55 : 0}
           roughness={0.7}
           transparent
           opacity={isDragging ? 0.25 : 0.85}
@@ -1095,7 +1167,12 @@ function PlacementMesh({
         position={[0, h / 2 + 0.15, 0]}
         style={{ pointerEvents: 'none' }}
       >
-        <div className="whitespace-nowrap rounded bg-amber-600/85 px-2 py-0.5 text-[10px] font-medium text-white">
+        <div
+          className={
+            'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white ' +
+            (selected ? 'bg-purple-600/90' : 'bg-amber-600/85')
+          }
+        >
           {item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
         </div>
       </Html>
@@ -1115,6 +1192,7 @@ function PlacementMesh({
         e.stopPropagation();
         const target = e.target as Element & { setPointerCapture?: (id: number) => void };
         target.setPointerCapture?.(e.pointerId);
+        pointerStartRef.current = { clientX: e.clientX, clientY: e.clientY };
         setDrag({
           id: placement.id,
           worldX: renderX,
@@ -1143,7 +1221,23 @@ function PlacementMesh({
         if (drag?.id !== placement.id) return;
         e.stopPropagation();
         const captured = drag;
+        const start = pointerStartRef.current;
+        pointerStartRef.current = null;
         setDrag(null);
+        // Treat as a click (select) if the pointer barely moved AND rotation
+        // didn't change — both mean the user tapped the item rather than
+        // dragging it.
+        const moved = start
+          ? Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY)
+          : Infinity;
+        const rotated = Math.abs(captured.rotation_y - placement.rotation_y) > 1e-3;
+        if (moved < CLICK_THRESHOLD_PX && !rotated) {
+          // Toggle: clicking an already-selected catalog item deselects it.
+          // Selection is at the catalog level so identical duplicates (4
+          // chairs of the same product) glow as a group.
+          onSelect?.(selected ? null : placement.catalog_item_id);
+          return;
+        }
         const { x, z } = toFloor(captured.worldX, captured.worldZ);
         void onCommitMove(captured.id, x, z, captured.rotation_y);
       }}
@@ -1168,6 +1262,7 @@ function PlacementMesh({
               label={item?.name?.split(' – ').pop()?.slice(0, 32) ?? placement.catalog_item_id}
               labelHeight={h}
               dragging={isDragging}
+              selected={selected}
             />
           </Suspense>
         </GlbErrorBoundary>
@@ -1209,6 +1304,7 @@ function PlacedGlb({
   label,
   labelHeight,
   dragging = false,
+  selected = false,
 }: {
   url: string;
   worldX: number;
@@ -1221,6 +1317,10 @@ function PlacedGlb({
    *  other pieces underneath remain visible. We mutate the cloned scene's
    *  materials in an effect so opacity tracks the boolean. */
   dragging?: boolean;
+  /** When true, paints a purple emissive tint on every mesh in the GLB so
+   *  the selected item glows. The original emissive is cached on the
+   *  material's userData and restored on deselect. */
+  selected?: boolean;
 }) {
   const gltf = useGLTF(url);
   // Clone so the same GLB used in multiple places renders independently.
@@ -1247,6 +1347,41 @@ function PlacedGlb({
       }
     });
   }, [scene, dragging]);
+  // Emissive tint for selection. Only applied to materials that support
+  // emissive (MeshStandardMaterial / MeshPhysicalMaterial — covers ~all GLBs).
+  // Original emissive is cached on userData so toggling off restores any
+  // baked-in glow (lampshades, screens, etc.).
+  useEffect(() => {
+    type EmissiveMaterial = THREE.Material & {
+      emissive?: THREE.Color;
+      emissiveIntensity?: number;
+    };
+    const seen = new Set<THREE.Material>();
+    scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const raw of mats) {
+        if (!raw || seen.has(raw)) continue;
+        seen.add(raw);
+        const m = raw as EmissiveMaterial;
+        if (!m.emissive) continue;
+        const ud = m.userData as { __origEmissive?: THREE.Color; __origIntensity?: number };
+        if (!ud.__origEmissive) {
+          ud.__origEmissive = m.emissive.clone();
+          ud.__origIntensity = m.emissiveIntensity ?? 1;
+        }
+        if (selected) {
+          m.emissive.setHex(0x7c3aed);
+          m.emissiveIntensity = 0.55;
+        } else {
+          m.emissive.copy(ud.__origEmissive);
+          m.emissiveIntensity = ud.__origIntensity ?? 1;
+        }
+        m.needsUpdate = true;
+      }
+    });
+  }, [scene, selected]);
   return (
     <group position={[worldX, floorY, worldZ]} rotation={[0, rotationY, 0]}>
       <primitive object={scene} castShadow={!dragging} receiveShadow={!dragging} />
@@ -1259,7 +1394,11 @@ function PlacedGlb({
         <div
           className={
             'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-medium text-white transition ' +
-            (dragging ? 'bg-emerald-700/40' : 'bg-emerald-700/85')
+            (selected
+              ? 'bg-purple-600/90'
+              : dragging
+                ? 'bg-emerald-700/40'
+                : 'bg-emerald-700/85')
           }
         >
           {label}

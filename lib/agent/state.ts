@@ -294,10 +294,20 @@ export function restorePlacements(snapshot: Placement[]) {
   bump(s);
 }
 
+/** Streaming hooks for SOLVE_LAYOUT. The agent loop wires `onCleared` and
+ *  `onPlacement` so the client can pop the design-source furniture in one
+ *  piece at a time. Pinned (drag) placements never fire — they survive
+ *  unchanged across solves. Both callbacks are awaited so the caller can
+ *  insert per-event delay (the loop sleeps ~150 ms between placements). */
+export type SolveStreamHooks = {
+  onCleared?: () => void | Promise<void>;
+  onPlacement?: (p: Placement) => void | Promise<void>;
+};
+
 /** Run the optimizer on the current design. Wipes prior 'design'-source
  *  placements but preserves user-dragged ones. Updates the design's outcome
  *  with what was placed/dropped. */
-export async function solveCurrentDesign(): Promise<{
+export async function solveCurrentDesign(hooks: SolveStreamHooks = {}): Promise<{
   placed: Array<{ assignment_id: string; item_id: string; placement_id: string; anchor: string }>;
   dropped: Array<{ assignment_id: string; item_id: string; reason: string; detail: string; measurements?: Record<string, number | string> }>;
 }> {
@@ -320,10 +330,26 @@ export async function solveCurrentDesign(): Promise<{
     pinned,
     catalogLookup: (id) => s.catalog.find((c) => c.id === id),
   });
-  // Commit: replace placements with the solver output.
+
+  // Split the solver output: pinned items are already in s.placements and
+  // shouldn't fire onPlacement; design items are the ones we stream.
+  const designPlacements = result.placements.filter((p) => p.source !== 'drag');
+
+  // Tell the client to wipe its current design-source overlay before any new
+  // pieces stream in. Pinned items remain rendered — the client preserves them.
+  await hooks.onCleared?.();
+
+  // Replace state in one shot (the client renders from the streaming overlay
+  // until the post-turn refresh swaps in the canonical state). Mutating one
+  // at a time would race with the post-turn /api/agent-context fetch.
   s.placements = result.placements;
-  // Bump mutation_id so the tree (and downstream caches) rebuild.
   bump(s);
+
+  // Stream each design placement out so the canvas can pop them in one by one.
+  for (const p of designPlacements) {
+    await hooks.onPlacement?.(p);
+  }
+
   s.design.outcome = {
     last_solved_mutation_id: s.mutation_id,
     placed: result.outcome.placed,
