@@ -1135,31 +1135,39 @@ function ObjectBox({
     t.position[1] + yOffset,
     t.position[2],
   ];
+  // Fireplaces: keep the bbox at its detected dimensions (don't change
+  // geometry — that would diverge from the scan), just push back along
+  // local Z so the front sits against the wall and only a small portion
+  // of the back pokes through the wall hole.
+  const localShift: [number, number, number] =
+    cat === 'fireplace' ? [0, 0, d * 0.2] : [0, 0, 0];
 
   return (
     <group position={groupPos} quaternion={quat}>
-      <mesh castShadow={!transparent} receiveShadow={!transparent}>
-        <boxGeometry args={[w, h, d]} />
-        <meshStandardMaterial
-          color={color}
-          transparent={transparent}
-          opacity={opacity}
-          roughness={0.7}
-          depthWrite={depthWrite}
-        />
-      </mesh>
-      {showLabel && (
-        <Html
-          center
-          distanceFactor={8}
-          position={[0, h / 2 + 0.15, 0]}
-          style={{ pointerEvents: 'none' }}
-        >
-          <div className="whitespace-nowrap rounded bg-neutral-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
-            {cat}
-          </div>
-        </Html>
-      )}
+      <group position={localShift}>
+        <mesh castShadow={!transparent} receiveShadow={!transparent}>
+          <boxGeometry args={[w, h, d]} />
+          <meshStandardMaterial
+            color={color}
+            transparent={transparent}
+            opacity={opacity}
+            roughness={0.7}
+            depthWrite={depthWrite}
+          />
+        </mesh>
+        {showLabel && (
+          <Html
+            center
+            distanceFactor={8}
+            position={[0, h / 2 + 0.15, 0]}
+            style={{ pointerEvents: 'none' }}
+          >
+            <div className="whitespace-nowrap rounded bg-neutral-900/80 px-2 py-0.5 text-[10px] font-medium text-white">
+              {cat}
+            </div>
+          </Html>
+        )}
+      </group>
     </group>
   );
 }
