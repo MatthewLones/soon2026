@@ -628,30 +628,36 @@ function ModeHud({
         </div>
       </div>
 
-      <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
-        <div className="flex gap-1">
-          {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
-            const disabled = !splatAvailable && v !== 'wireframe';
-            return (
-              <button
-                key={v}
-                onClick={() => !disabled && onViewModeChange(v)}
-                disabled={disabled}
-                className={
-                  'rounded px-3 py-1 text-xs font-medium transition ' +
-                  (viewMode === v
-                    ? 'bg-neutral-900 text-white'
-                    : disabled
-                    ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
-                    : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300')
-                }
-              >
-                {v}
-              </button>
-            );
-          })}
+      {/* View toggle (wireframe / hybrid / splat) hidden until splats are
+          wired back in. The plumbing below (viewMode state, SplatOverlay
+          mount, etc.) stays intact so flipping splatAvailable=true brings it
+          back without code changes. */}
+      {splatAvailable && (
+        <div className="pointer-events-auto rounded-md p-0.5 text-neutral-900">
+          <div className="flex gap-1">
+            {(['wireframe', 'hybrid', 'splat'] as ViewMode[]).map((v) => {
+              const disabled = !splatAvailable && v !== 'wireframe';
+              return (
+                <button
+                  key={v}
+                  onClick={() => !disabled && onViewModeChange(v)}
+                  disabled={disabled}
+                  className={
+                    'rounded px-3 py-1 text-xs font-medium transition ' +
+                    (viewMode === v
+                      ? 'bg-neutral-900 text-white'
+                      : disabled
+                      ? 'bg-neutral-100 text-neutral-400 cursor-not-allowed'
+                      : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300')
+                  }
+                >
+                  {v}
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
