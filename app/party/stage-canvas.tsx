@@ -27,6 +27,7 @@ import {
   OBJECT_COLORS,
 } from '@/lib/roomplan';
 import { buildHolesByWall } from '@/lib/room/segments';
+import { CANVAS_FOCUS_ATTR, isCanvasFocused } from '@/lib/canvas-focus';
 import type { Player, RoomSnapshot } from '@/lib/party/types';
 import type { Placement } from '@/lib/room/grid';
 import type { CatalogItem } from '@/lib/agent/catalog';
@@ -76,11 +77,11 @@ export default function StageCanvas({
   const floorY = useMemo(() => room.floors[0]?.transform[13] ?? -1.5, [room.floors]);
 
   const [mode, setMode] = useState<Mode>('orbit');
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      if (!isCanvasFocused()) return;
       if (e.code === 'KeyV') setMode((m) => (m === 'orbit' ? 'ghost' : 'orbit'));
     };
     window.addEventListener('keydown', handler);
@@ -88,6 +89,13 @@ export default function StageCanvas({
   }, []);
 
   return (
+    <div
+      ref={wrapRef}
+      className="absolute inset-0 outline-none"
+      tabIndex={0}
+      {...{ [CANVAS_FOCUS_ATTR]: '' }}
+      onPointerDown={() => wrapRef.current?.focus()}
+    >
     <Canvas
       shadows
       camera={{
@@ -162,6 +170,7 @@ export default function StageCanvas({
         <OrbitControls target={cameraTarget} makeDefault />
       )}
     </Canvas>
+    </div>
   );
 }
 
@@ -189,6 +198,7 @@ function GhostRig({
       ArrowUp: 'w', ArrowLeft: 'a', ArrowDown: 's', ArrowRight: 'd',
     };
     const down = (e: KeyboardEvent) => {
+      if (!isCanvasFocused()) return;
       const k = map[e.code];
       if (k) keys.current[k] = true;
     };

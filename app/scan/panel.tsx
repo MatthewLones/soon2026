@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import Image from 'next/image';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -20,7 +20,7 @@ const TAB_LABEL: Record<Tab, string> = {
   prompt: 'system prompt',
 };
 
-type ChatEvent =
+export type ChatEvent =
   | { type: 'user_message'; text: string; t: number }
   | { type: 'tool_call'; id: string; name: string; input: unknown; t: number }
   | { type: 'tool_result'; id: string; result: unknown; t: number }
@@ -29,26 +29,56 @@ type ChatEvent =
   | { type: 'loop_aborted'; reason: string; t: number }
   | { type: 'error'; message: string; t?: number };
 
-type ModelChoice = 'sonnet' | 'opus';
+export type ModelChoice = 'sonnet' | 'opus';
+
+/** Chat state held in the parent layout so toggling verbose mode (which
+ *  swaps AgentPanel for TreeDebugPanel) doesn't blow away the user's
+ *  draft, conversation history, or settings. */
+export type ChatState = {
+  input: string;
+  events: ChatEvent[];
+  streaming: boolean;
+  model: ModelChoice;
+  thinkingOn: boolean;
+  thinkingBudget: number;
+  maxToolIterations: number;
+};
+
+export const INITIAL_CHAT_STATE: ChatState = {
+  input: '',
+  events: [],
+  streaming: false,
+  model: 'sonnet',
+  thinkingOn: false,
+  thinkingBudget: 5000,
+  maxToolIterations: 24,
+};
 
 export default function AgentPanel({
   ctx,
   onRefresh,
   onCatalogDragStart,
   onCatalogDragEnd,
+  chatState,
+  setChatState,
+  rolePromptDraft,
+  setRolePromptDraft,
 }: {
   ctx: AgentContext | null;
   onRefresh: () => void;
   onCatalogDragStart?: (id: string) => void;
   onCatalogDragEnd?: () => void;
+  chatState: ChatState;
+  setChatState: Dispatch<SetStateAction<ChatState>>;
+  rolePromptDraft: string;
+  setRolePromptDraft: (v: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>('chat');
-  const [rolePromptDraft, setRolePromptDraft] = useState('');
 
   // Seed the role-prompt textarea once we have context.
   useEffect(() => {
     if (ctx && !rolePromptDraft) setRolePromptDraft(ctx.defaultRolePrompt);
-  }, [ctx, rolePromptDraft]);
+  }, [ctx, rolePromptDraft, setRolePromptDraft]);
 
   return (
     <aside className="flex w-[440px] shrink-0 flex-col border-l border-neutral-300 bg-white text-neutral-900">
@@ -74,6 +104,8 @@ export default function AgentPanel({
           <ChatTab
             rolePromptOverride={rolePromptDraft !== ctx?.defaultRolePrompt ? rolePromptDraft : undefined}
             onTurnComplete={onRefresh}
+            chatState={chatState}
+            setChatState={setChatState}
           />
         )}
         {tab === 'catalog' && (
@@ -96,20 +128,23 @@ export default function AgentPanel({
 function ChatTab({
   rolePromptOverride,
   onTurnComplete,
+  chatState,
+  setChatState,
 }: {
   rolePromptOverride?: string;
   onTurnComplete: () => void;
+  chatState: ChatState;
+  setChatState: Dispatch<SetStateAction<ChatState>>;
 }) {
-  const [input, setInput] = useState('');
-  const [events, setEvents] = useState<ChatEvent[]>([]);
-  const [streaming, setStreaming] = useState(false);
-  const [model, setModel] = useState<ModelChoice>('sonnet');
-  const [thinkingOn, setThinkingOn] = useState(false);
-  const [thinkingBudget, setThinkingBudget] = useState(5000);
-  /** Cap on agent ↔ tool round-trips per turn. Bump for hard placement
-   *  problems where the agent needs many ADD/SOLVE retry cycles. */
-  const [maxToolIterations, setMaxToolIterations] = useState(24);
+  const { input, events, streaming, model, thinkingOn, thinkingBudget, maxToolIterations } =
+    chatState;
   const scrollerRef = useRef<HTMLDivElement>(null);
+
+  // Functional updates so streaming writes from a stale closure (e.g. when
+  // the panel was unmounted mid-stream by a verbose toggle) still merge
+  // correctly against the latest state.
+  const pushEvent = (ev: ChatEvent) =>
+    setChatState((s) => ({ ...s, events: [...s.events, ev] }));
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -119,9 +154,12 @@ function ChatTab({
   async function send() {
     if (!input.trim() || streaming) return;
     const message = input;
-    setInput('');
-    setEvents([{ type: 'user_message', text: message, t: Date.now() }]);
-    setStreaming(true);
+    setChatState((s) => ({
+      ...s,
+      input: '',
+      events: [{ type: 'user_message', text: message, t: Date.now() }],
+      streaming: true,
+    }));
     try {
       console.log('[ChatTab] Sending to /api/chat…', message.slice(0, 80));
       const res = await fetch('/api/chat', {
@@ -139,7 +177,7 @@ function ChatTab({
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
         console.error('[ChatTab] Non-OK response:', res.status, text);
-        setEvents((e) => [...e, { type: 'error', message: `HTTP ${res.status}: ${text || res.statusText}` }]);
+        pushEvent({ type: 'error', message: `HTTP ${res.status}: ${text || res.statusText}` });
         return;
       }
       const reader = res.body.getReader();
@@ -164,26 +202,23 @@ function ChatTab({
             const parsed = JSON.parse(dataLine.slice(6)) as ChatEvent;
             frameCount++;
             console.log('[ChatTab] SSE frame', frameCount, '→', parsed.type, 'name' in parsed ? (parsed as { name: string }).name : '');
-            setEvents((e) => [...e, parsed]);
+            pushEvent(parsed);
           } catch (err) {
             console.error('[ChatTab] bad SSE frame', frame, err);
-            setEvents((e) => [...e, { type: 'error', message: `Bad SSE frame: ${frame.slice(0, 200)}` }]);
+            pushEvent({ type: 'error', message: `Bad SSE frame: ${frame.slice(0, 200)}` });
           }
         }
       }
       if (frameCount === 0) {
         console.warn('[ChatTab] Stream ended with 0 SSE frames \u2014 the agent may have failed silently');
-        setEvents((e) => [...e, { type: 'error', message: 'Stream ended with no events \u2014 check the terminal for server-side errors' }]);
+        pushEvent({ type: 'error', message: 'Stream ended with no events \u2014 check the terminal for server-side errors' });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error('[ChatTab] fetch threw:', msg);
-      setEvents((evts) => [
-        ...evts,
-        { type: 'error', message: msg },
-      ]);
+      pushEvent({ type: 'error', message: msg });
     } finally {
-      setStreaming(false);
+      setChatState((s) => ({ ...s, streaming: false }));
       onTurnComplete();
     }
   }
@@ -203,7 +238,15 @@ function ChatTab({
       <div className="border-t border-dashed border-neutral-300 p-2">
         <textarea
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => setChatState((s) => ({ ...s, input: e.target.value }))}
+          onKeyDown={(e) => {
+            // Enter sends, Shift+Enter inserts a newline. Ignore while
+            // streaming so a stray Enter can't trigger a second turn.
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              if (!streaming) void send();
+            }
+          }}
           rows={3}
           className="w-full resize-none rounded bg-transparent p-2 text-xs outline-none placeholder:text-neutral-400"
           placeholder="What would you like the agent to do?"
@@ -213,7 +256,9 @@ function ChatTab({
           <div className="flex items-center gap-2 text-[10px]">
             <select
               value={model}
-              onChange={(e) => setModel(e.target.value as ModelChoice)}
+              onChange={(e) =>
+                setChatState((s) => ({ ...s, model: e.target.value as ModelChoice }))
+              }
               disabled={streaming}
               className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 font-medium text-neutral-800 disabled:opacity-40"
             >
@@ -224,7 +269,9 @@ function ChatTab({
               <input
                 type="checkbox"
                 checked={thinkingOn}
-                onChange={(e) => setThinkingOn(e.target.checked)}
+                onChange={(e) =>
+                  setChatState((s) => ({ ...s, thinkingOn: e.target.checked }))
+                }
                 disabled={streaming}
                 className="h-3 w-3"
               />
@@ -234,7 +281,12 @@ function ChatTab({
               <input
                 type="number"
                 value={thinkingBudget}
-                onChange={(e) => setThinkingBudget(Math.max(1024, Number(e.target.value) || 5000))}
+                onChange={(e) =>
+                  setChatState((s) => ({
+                    ...s,
+                    thinkingBudget: Math.max(1024, Number(e.target.value) || 5000),
+                  }))
+                }
                 step={1000}
                 min={1024}
                 max={32000}
@@ -248,9 +300,13 @@ function ChatTab({
                 type="number"
                 value={maxToolIterations}
                 onChange={(e) =>
-                  setMaxToolIterations(
-                    Math.min(64, Math.max(4, Number(e.target.value) || 24))
-                  )
+                  setChatState((s) => ({
+                    ...s,
+                    maxToolIterations: Math.min(
+                      64,
+                      Math.max(4, Number(e.target.value) || 24)
+                    ),
+                  }))
                 }
                 step={4}
                 min={4}

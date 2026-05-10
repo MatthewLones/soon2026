@@ -77,6 +77,7 @@ import {
   closestPointOnSegment,
 } from '@/lib/room/segments';
 import type { SemanticTree } from '@/lib/room/semantic_tree';
+import { CANVAS_FOCUS_ATTR, isCanvasFocused } from '@/lib/canvas-focus';
 import SplatOverlay, { type SyncedCamera } from './splat-overlay';
 import TreeDebugOverlay from './tree-debug-overlay';
 
@@ -308,6 +309,7 @@ export default function ScanCanvas({
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (!isCanvasFocused()) return;
       if (e.code === 'KeyV') changeMode(mode === 'orbit' ? 'walk' : 'orbit');
     };
     window.addEventListener('keydown', handler);
@@ -339,7 +341,10 @@ export default function ScanCanvas({
       )}
       <div
         ref={canvasWrapRef}
-        className="absolute inset-0"
+        className="absolute inset-0 outline-none"
+        tabIndex={0}
+        {...{ [CANVAS_FOCUS_ATTR]: '' }}
+        onPointerDown={() => canvasWrapRef.current?.focus()}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -697,6 +702,7 @@ function FirstPersonRig({
       ArrowRight: 'd',
     };
     const down = (e: KeyboardEvent) => {
+      if (!isCanvasFocused()) return;
       const k = map[e.code];
       if (k) keys.current[k] = true;
     };

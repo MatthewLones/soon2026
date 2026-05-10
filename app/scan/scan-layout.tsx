@@ -8,8 +8,9 @@ import type { CompactRoom } from '@/lib/room/serialize';
 import type { Vec2, Vec3 } from '@/lib/room/normalize';
 import type { Placement } from '@/lib/room/grid';
 import type { SemanticTree } from '@/lib/room/semantic_tree';
+import { isCanvasFocused } from '@/lib/canvas-focus';
 import ScanCanvas from './scan-canvas';
-import AgentPanel from './panel';
+import AgentPanel, { type ChatState, INITIAL_CHAT_STATE } from './panel';
 import TreeDebugPanel from './tree-debug-panel';
 import StartPartyButton from './start-party';
 
@@ -83,6 +84,11 @@ export default function ScanLayout({
   /** Cross-pane hover sync: hovering a wall/object/room id in the panel
    *  highlights the corresponding 3D element, and vice versa. */
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  /** Chat session lives at the layout level so toggling verbose (which
+   *  swaps AgentPanel for TreeDebugPanel) doesn't unmount the chat and
+   *  destroy the user's draft, history, model choice, etc. */
+  const [chatState, setChatState] = useState<ChatState>(INITIAL_CHAT_STATE);
+  const [rolePromptDraft, setRolePromptDraft] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -100,11 +106,12 @@ export default function ScanLayout({
   // Keyboard shortcuts:
   //   "L" toggles label mode (clean letters for chat)
   //   "V" toggles verbose mode (full debug breakdown)
-  // Skip when typing in an input/textarea so the chat composer isn't hijacked.
+  // Only fire when the 3D canvas itself has focus — anywhere else (chat,
+  // buttons, the panel) the keys go to the browser as normal so typing in
+  // the composer is never hijacked.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!isCanvasFocused()) return;
       // Labels and verbose are mutually exclusive: turning one on forces the
       // other off. Both can still be off.
       if (e.key === 'l' || e.key === 'L') {
@@ -285,6 +292,10 @@ export default function ScanLayout({
           onRefresh={refresh}
           onCatalogDragStart={setDraggingCatalogItemId}
           onCatalogDragEnd={() => setDraggingCatalogItemId(null)}
+          chatState={chatState}
+          setChatState={setChatState}
+          rolePromptDraft={rolePromptDraft}
+          setRolePromptDraft={setRolePromptDraft}
         />
       ))}
       {resetConfirm && mounted && createPortal(
